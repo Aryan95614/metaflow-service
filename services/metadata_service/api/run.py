@@ -105,14 +105,43 @@ class RunApi(object):
                     headers=MultiDict(
                         {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
+            if _cursor is not None and _limit is None:
+                return web.Response(
+                    status=400,
+                    body=json.dumps(
+                        {"error": "_limit is required when using _cursor"}),
+                    headers=MultiDict(
+                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
+            try:
+                page_limit = int(_limit) if _limit else 0
+                if _limit is not None and page_limit < 0:
+                    raise ValueError()
+            except ValueError:
+                return web.Response(
+                    status=400,
+                    body=json.dumps(
+                        {"error": "Invalid value for _limit: must be a positive integer"}),
+                    headers=MultiDict(
+                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
+            try:
+                cursor_value = int(_cursor) if _cursor is not None else None
+            except ValueError:
+                return web.Response(
+                    status=400,
+                    body=json.dumps(
+                        {"error": "Invalid value for _cursor: must be an integer"}),
+                    headers=MultiDict(
+                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
             conditions = ["flow_id = %s"]
             values = [flow_name]
 
-            if _cursor is not None:
+            if cursor_value is not None:
                 conditions.append("ts_epoch < %s")
-                values.append(int(_cursor))
+                values.append(cursor_value)
 
-            page_limit = int(_limit) if _limit else 0
             fetch_limit = page_limit + 1 if page_limit > 0 else 0
 
             db_response, _ = await self._async_table.find_records(
