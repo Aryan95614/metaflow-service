@@ -1,11 +1,14 @@
+import json
 import asyncio
 from itertools import chain
 
+from aiohttp import web
+from multidict import MultiDict
 from services.data.db_utils import DBResponse
 from services.data.models import RunRow
 from services.utils import has_heartbeat_capable_version_tag, read_body
 from services.metadata_service.api.utils import format_response, \
-    handle_exceptions
+    handle_exceptions, http_500, METADATA_SERVICE_HEADER, METADATA_SERVICE_VERSION
 from services.data.postgres_async_db import AsyncPostgresDB
 
 
@@ -59,12 +62,10 @@ class RunApi(object):
         run_number = request.match_info.get("run_number")
         return await self._async_table.get_run(flow_name, run_number)
 
-    @format_response
-    @handle_exceptions
     async def get_all_runs(self, request):
         """
         ---
-        description: Get all runs
+        description: Get all runs, with optional cursor-based pagination
         tags:
         - Run
         parameters:
@@ -73,6 +74,16 @@ class RunApi(object):
           description: "flow_id"
           required: true
           type: "string"
+        - name: "_limit"
+          in: "query"
+          description: "page size (0 or absent for all)"
+          required: false
+          type: "integer"
+        - name: "_cursor"
+          in: "query"
+          description: "ts_epoch to paginate from"
+          required: false
+          type: "integer"
         produces:
         - text/plain
         responses:
@@ -81,8 +92,64 @@ class RunApi(object):
             "405":
                 description: invalid HTTP Method
         """
-        flow_name = request.match_info.get("flow_id")
-        return await self._async_table.get_all_runs(flow_name)
+        try:
+            flow_name = request.match_info.get("flow_id")
+            _limit = request.query.get("_limit")
+            _cursor = request.query.get("_cursor")
+
+            if _limit is None and _cursor is None:
+                db_response = await self._async_table.get_all_runs(flow_name)
+                return web.Response(
+                    status=db_response.response_code,
+                    body=json.dumps(db_response.body),
+                    headers=MultiDict(
+                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
+            conditions = ["flow_id = %s"]
+            values = [flow_name]
+
+            if _cursor is not None:
+                conditions.append("ts_epoch < %s")
+                values.append(int(_cursor))
+
+            page_limit = int(_limit) if _limit else 0
+            fetch_limit = page_limit + 1 if page_limit > 0 else 0
+
+            db_response, _ = await self._async_table.find_records(
+                conditions=conditions,
+                values=values,
+                order=["ts_epoch DESC"],
+                limit=fetch_limit,
+            )
+
+            if db_response.response_code != 200:
+                return web.Response(
+                    status=db_response.response_code,
+                    body=json.dumps(db_response.body),
+                    headers=MultiDict(
+                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
+            records = db_response.body
+            headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
+
+            if page_limit > 0:
+                has_more = len(records) > page_limit
+                if has_more:
+                    records = records[:page_limit]
+                    headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
+                headers["X-Has-More"] = str(has_more).lower()
+
+            return web.Response(
+                status=200,
+                body=json.dumps(records),
+                headers=MultiDict(headers))
+        except Exception as err:
+            error_response = http_500(str(err))
+            return web.Response(
+                status=error_response.response_code,
+                body=json.dumps(error_response.body),
+                headers=MultiDict(
+                    {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
     @format_response
     @handle_exceptions
