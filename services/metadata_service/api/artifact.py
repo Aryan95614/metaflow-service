@@ -1,17 +1,22 @@
+import json
+
 from aiohttp import web
-from services.data.postgres_async_db import AsyncPostgresDB
+from multidict import MultiDict
 from services.data.db_utils import (
     filter_artifacts_for_latest_attempt,
     filter_artifacts_by_attempt_id_for_tasks,
+    translate_run_key,
 )
+from services.data.postgres_async_db import AsyncPostgresDB
 from services.data.tagging_utils import apply_run_tags_to_db_response
 from services.utils import read_body
 from services.metadata_service.api.utils import (
     format_response,
     handle_exceptions,
     http_500,
+    METADATA_SERVICE_HEADER,
+    METADATA_SERVICE_VERSION,
 )
-import json
 
 
 class ArtificatsApi(object):
@@ -180,7 +185,7 @@ class ArtificatsApi(object):
     async def get_artifacts_by_task(self, request):
         """
         ---
-        description: get all artifacts associated with the specified task.
+        description: get all artifacts associated with the specified task, with optional cursor-based pagination
         tags:
         - Artifacts
         parameters:
@@ -204,6 +209,16 @@ class ArtificatsApi(object):
           description: "task_id"
           required: true
           type: "string"
+        - name: "_limit"
+          in: "query"
+          description: "page size (0 or absent for all)"
+          required: false
+          type: "integer"
+        - name: "_cursor"
+          in: "query"
+          description: "ts_epoch to paginate from"
+          required: false
+          type: "integer"
         produces:
         - text/plain
         responses:
@@ -216,21 +231,83 @@ class ArtificatsApi(object):
         run_number = request.match_info.get("run_number")
         step_name = request.match_info.get("step_name")
         task_id = request.match_info.get("task_id")
+        _limit = request.query.get("_limit")
+        _cursor = request.query.get("_cursor")
 
-        db_response = await self._async_table.get_artifact_in_task(
-            flow_id, run_number, step_name, task_id
-        )
-        if db_response.response_code == 200:
+        if _limit is None and _cursor is None:
+            db_response = await self._async_table.get_artifact_in_task(
+                flow_id, run_number, step_name, task_id
+            )
+            if db_response.response_code == 200:
+                db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
+                filtered_body = filter_artifacts_for_latest_attempt(db_response.body)
+                return web.Response(
+                    status=db_response.response_code, body=json.dumps(filtered_body)
+                )
+            else:
+                return web.Response(
+                    status=db_response.response_code,
+                    body=json.dumps(http_500(db_response.body)),
+                )
+
+        error_response = _validate_pagination_params(_limit, _cursor)
+        if error_response is not None:
+            return error_response
+
+        page_limit = int(_limit) if _limit else 0
+        cursor_value = int(_cursor) if _cursor is not None else None
+
+        try:
+            run_key, run_value = translate_run_key(run_number)
+            conditions = ["flow_id = %s", "{} = %s".format(run_key), "step_name = %s", "task_id = %s"]
+            values = [flow_id, run_value, step_name, task_id]
+
+            if cursor_value is not None:
+                conditions.append("ts_epoch < %s")
+                values.append(cursor_value)
+
+            fetch_limit = page_limit + 1 if page_limit > 0 else 0
+
+            db_response, _ = await self._async_table.find_records(
+                conditions=conditions,
+                values=values,
+                order=["ts_epoch DESC"],
+                limit=fetch_limit,
+            )
+
+            if db_response.response_code != 200:
+                return web.Response(
+                    status=db_response.response_code,
+                    body=json.dumps(db_response.body),
+                    headers=MultiDict(
+                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
-            filtered_body = filter_artifacts_for_latest_attempt(db_response.body)
+            records = db_response.body
+            headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
+
+            if page_limit > 0:
+                has_more = len(records) > page_limit
+                if has_more:
+                    records = records[:page_limit]
+                headers["X-Has-More"] = str(has_more).lower()
+
+            filtered_records = filter_artifacts_for_latest_attempt(records)
+
+            if page_limit > 0 and has_more:
+                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
+
             return web.Response(
-                status=db_response.response_code, body=json.dumps(filtered_body)
-            )
-        else:
+                status=200,
+                body=json.dumps(filtered_records),
+                headers=MultiDict(headers))
+        except Exception as err:
+            error_response = http_500(str(err))
             return web.Response(
-                status=db_response.response_code,
-                body=json.dumps(http_500(db_response.body)),
-            )
+                status=error_response.response_code,
+                body=json.dumps(error_response.body),
+                headers=MultiDict(
+                    {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
     async def get_artifacts_by_task_attempt(self, request):
         """
@@ -286,7 +363,6 @@ class ArtificatsApi(object):
             if db_response.body:
                 attempt_for_task = {db_response.body[0]["task_id"]: int(attempt_id)}
             else:
-                # Doesn't matter
                 attempt_for_task = {}
             filtered_body = filter_artifacts_by_attempt_id_for_tasks(
                 db_response.body, attempt_for_task
@@ -303,7 +379,7 @@ class ArtificatsApi(object):
     async def get_artifacts_by_step(self, request):
         """
         ---
-        description: get all artifacts associated with the specified task.
+        description: get all artifacts associated with the specified step, with optional cursor-based pagination
         tags:
         - Artifacts
         parameters:
@@ -322,6 +398,16 @@ class ArtificatsApi(object):
           description: "step_name"
           required: true
           type: "string"
+        - name: "_limit"
+          in: "query"
+          description: "page size (0 or absent for all)"
+          required: false
+          type: "integer"
+        - name: "_cursor"
+          in: "query"
+          description: "ts_epoch to paginate from"
+          required: false
+          type: "integer"
         produces:
         - text/plain
         responses:
@@ -333,26 +419,88 @@ class ArtificatsApi(object):
         flow_id = request.match_info.get("flow_id")
         run_number = request.match_info.get("run_number")
         step_name = request.match_info.get("step_name")
+        _limit = request.query.get("_limit")
+        _cursor = request.query.get("_cursor")
 
-        db_response = await self._async_table.get_artifact_in_steps(
-            flow_id, run_number, step_name
-        )
-        if db_response.response_code == 200:
+        if _limit is None and _cursor is None:
+            db_response = await self._async_table.get_artifact_in_steps(
+                flow_id, run_number, step_name
+            )
+            if db_response.response_code == 200:
+                db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
+                filtered_body = filter_artifacts_for_latest_attempt(db_response.body)
+                return web.Response(
+                    status=db_response.response_code, body=json.dumps(filtered_body)
+                )
+            else:
+                return web.Response(
+                    status=db_response.response_code,
+                    body=json.dumps(http_500(db_response.body)),
+                )
+
+        error_response = _validate_pagination_params(_limit, _cursor)
+        if error_response is not None:
+            return error_response
+
+        page_limit = int(_limit) if _limit else 0
+        cursor_value = int(_cursor) if _cursor is not None else None
+
+        try:
+            run_key, run_value = translate_run_key(run_number)
+            conditions = ["flow_id = %s", "{} = %s".format(run_key), "step_name = %s"]
+            values = [flow_id, run_value, step_name]
+
+            if cursor_value is not None:
+                conditions.append("ts_epoch < %s")
+                values.append(cursor_value)
+
+            fetch_limit = page_limit + 1 if page_limit > 0 else 0
+
+            db_response, _ = await self._async_table.find_records(
+                conditions=conditions,
+                values=values,
+                order=["ts_epoch DESC"],
+                limit=fetch_limit,
+            )
+
+            if db_response.response_code != 200:
+                return web.Response(
+                    status=db_response.response_code,
+                    body=json.dumps(db_response.body),
+                    headers=MultiDict(
+                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
-            filtered_body = filter_artifacts_for_latest_attempt(db_response.body)
+            records = db_response.body
+            headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
+
+            if page_limit > 0:
+                has_more = len(records) > page_limit
+                if has_more:
+                    records = records[:page_limit]
+                headers["X-Has-More"] = str(has_more).lower()
+
+            filtered_records = filter_artifacts_for_latest_attempt(records)
+
+            if page_limit > 0 and has_more:
+                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
+
             return web.Response(
-                status=db_response.response_code, body=json.dumps(filtered_body)
-            )
-        else:
+                status=200,
+                body=json.dumps(filtered_records),
+                headers=MultiDict(headers))
+        except Exception as err:
+            error_response = http_500(str(err))
             return web.Response(
-                status=db_response.response_code,
-                body=json.dumps(http_500(db_response.body)),
-            )
+                status=error_response.response_code,
+                body=json.dumps(error_response.body),
+                headers=MultiDict(
+                    {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
     async def get_artifacts_by_run(self, request):
         """
         ---
-        description: get all artifacts associated with the specified task.
+        description: get all artifacts associated with the specified run, with optional cursor-based pagination
         tags:
         - Artifacts
         parameters:
@@ -366,6 +514,16 @@ class ArtificatsApi(object):
           description: "run_number"
           required: true
           type: "string"
+        - name: "_limit"
+          in: "query"
+          description: "page size (0 or absent for all)"
+          required: false
+          type: "integer"
+        - name: "_cursor"
+          in: "query"
+          description: "ts_epoch to paginate from"
+          required: false
+          type: "integer"
         produces:
         - text/plain
         responses:
@@ -376,19 +534,81 @@ class ArtificatsApi(object):
         """
         flow_id = request.match_info.get("flow_id")
         run_number = request.match_info.get("run_number")
+        _limit = request.query.get("_limit")
+        _cursor = request.query.get("_cursor")
 
-        db_response = await self._async_table.get_artifacts_in_runs(flow_id, run_number)
-        if db_response.response_code == 200:
+        if _limit is None and _cursor is None:
+            db_response = await self._async_table.get_artifacts_in_runs(flow_id, run_number)
+            if db_response.response_code == 200:
+                db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
+                filtered_body = filter_artifacts_for_latest_attempt(db_response.body)
+                return web.Response(
+                    status=db_response.response_code, body=json.dumps(filtered_body)
+                )
+            else:
+                return web.Response(
+                    status=db_response.response_code,
+                    body=json.dumps(http_500(db_response.body)),
+                )
+
+        error_response = _validate_pagination_params(_limit, _cursor)
+        if error_response is not None:
+            return error_response
+
+        page_limit = int(_limit) if _limit else 0
+        cursor_value = int(_cursor) if _cursor is not None else None
+
+        try:
+            run_key, run_value = translate_run_key(run_number)
+            conditions = ["flow_id = %s", "{} = %s".format(run_key)]
+            values = [flow_id, run_value]
+
+            if cursor_value is not None:
+                conditions.append("ts_epoch < %s")
+                values.append(cursor_value)
+
+            fetch_limit = page_limit + 1 if page_limit > 0 else 0
+
+            db_response, _ = await self._async_table.find_records(
+                conditions=conditions,
+                values=values,
+                order=["ts_epoch DESC"],
+                limit=fetch_limit,
+            )
+
+            if db_response.response_code != 200:
+                return web.Response(
+                    status=db_response.response_code,
+                    body=json.dumps(db_response.body),
+                    headers=MultiDict(
+                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
-            filtered_body = filter_artifacts_for_latest_attempt(db_response.body)
+            records = db_response.body
+            headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
+
+            if page_limit > 0:
+                has_more = len(records) > page_limit
+                if has_more:
+                    records = records[:page_limit]
+                headers["X-Has-More"] = str(has_more).lower()
+
+            filtered_records = filter_artifacts_for_latest_attempt(records)
+
+            if page_limit > 0 and has_more:
+                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
+
             return web.Response(
-                status=db_response.response_code, body=json.dumps(filtered_body)
-            )
-        else:
+                status=200,
+                body=json.dumps(filtered_records),
+                headers=MultiDict(headers))
+        except Exception as err:
+            error_response = http_500(str(err))
             return web.Response(
-                status=db_response.response_code,
-                body=json.dumps(http_500(db_response.body)),
-            )
+                status=error_response.response_code,
+                body=json.dumps(error_response.body),
+                headers=MultiDict(
+                    {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
     async def create_artifacts(self, request):
         """
@@ -454,23 +674,6 @@ class ArtificatsApi(object):
                 description: invalid HTTP Method
         """
 
-        # {
-        # 	"name": "test",
-        # 	"location": "test",
-        # 	"ds_type": "content",
-        # 	"sha": "test",
-        # 	"type": "content",
-        # 	"content_type": "content",
-        # 	"attempt_id": 0,
-        # 	"user_name": "fhamad",
-        # 	"tags": {
-        # 		"user": "fhamad"
-        # 	},
-        # 	"system_tags": {
-        # 		"user": "fhamad"
-        # 	}
-        # }
-
         flow_name = request.match_info.get("flow_id")
         run_number = request.match_info.get("run_number")
         step_name = request.match_info.get("step_name")
@@ -518,3 +721,37 @@ class ArtificatsApi(object):
         result = {"artifacts_created": count}
 
         return web.Response(body=json.dumps(result))
+
+
+def _validate_pagination_params(_limit, _cursor):
+    if _cursor is not None and _limit is None:
+        return web.Response(
+            status=400,
+            body=json.dumps(
+                {"error": "_limit is required when using _cursor"}),
+            headers=MultiDict(
+                {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
+    try:
+        page_limit = int(_limit) if _limit else 0
+        if _limit is not None and page_limit < 0:
+            raise ValueError()
+    except ValueError:
+        return web.Response(
+            status=400,
+            body=json.dumps(
+                {"error": "Invalid value for _limit: must be a positive integer"}),
+            headers=MultiDict(
+                {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
+    try:
+        int(_cursor) if _cursor is not None else None
+    except ValueError:
+        return web.Response(
+            status=400,
+            body=json.dumps(
+                {"error": "Invalid value for _cursor: must be an integer"}),
+            headers=MultiDict(
+                {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
+    return None
