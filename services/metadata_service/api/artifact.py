@@ -6,6 +6,7 @@ from services.data.db_utils import (
     filter_artifacts_for_latest_attempt,
     filter_artifacts_by_attempt_id_for_tasks,
     translate_run_key,
+    translate_task_key,
 )
 from services.data.postgres_async_db import AsyncPostgresDB
 from services.data.tagging_utils import apply_run_tags_to_db_response
@@ -259,8 +260,9 @@ class ArtificatsApi(object):
 
         try:
             run_key, run_value = translate_run_key(run_number)
-            conditions = ["flow_id = %s", "{} = %s".format(run_key), "step_name = %s", "task_id = %s"]
-            values = [flow_id, run_value, step_name, task_id]
+            task_key, task_value = translate_task_key(task_id)
+            conditions = ["flow_id = %s", "{} = %s".format(run_key), "step_name = %s", "{} = %s".format(task_key)]
+            values = [flow_id, run_value, step_name, task_value]
 
             if cursor_value is not None:
                 conditions.append("ts_epoch < %s")
@@ -285,6 +287,7 @@ class ArtificatsApi(object):
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
             records = db_response.body
             headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
+            has_more = False
 
             if page_limit > 0:
                 has_more = len(records) > page_limit
@@ -294,7 +297,7 @@ class ArtificatsApi(object):
 
             filtered_records = filter_artifacts_for_latest_attempt(records)
 
-            if page_limit > 0 and has_more:
+            if has_more:
                 headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
 
             return web.Response(
@@ -473,6 +476,7 @@ class ArtificatsApi(object):
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
             records = db_response.body
             headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
+            has_more = False
 
             if page_limit > 0:
                 has_more = len(records) > page_limit
@@ -482,7 +486,7 @@ class ArtificatsApi(object):
 
             filtered_records = filter_artifacts_for_latest_attempt(records)
 
-            if page_limit > 0 and has_more:
+            if has_more:
                 headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
 
             return web.Response(
@@ -586,6 +590,7 @@ class ArtificatsApi(object):
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
             records = db_response.body
             headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
+            has_more = False
 
             if page_limit > 0:
                 has_more = len(records) > page_limit
@@ -595,7 +600,7 @@ class ArtificatsApi(object):
 
             filtered_records = filter_artifacts_for_latest_attempt(records)
 
-            if page_limit > 0 and has_more:
+            if has_more:
                 headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
 
             return web.Response(
