@@ -73,6 +73,11 @@ class RunApi(object):
           description: "flow_id"
           required: true
           type: "string"
+        - name: "_tag"
+          in: "query"
+          description: "Filter by tag value. Matches against both user tags and system tags. Can be specified multiple times; all tags must match (AND logic)."
+          required: false
+          type: "string"
         produces:
         - text/plain
         responses:
@@ -82,7 +87,24 @@ class RunApi(object):
                 description: invalid HTTP Method
         """
         flow_name = request.match_info.get("flow_id")
-        return await self._async_table.get_all_runs(flow_name)
+        tags = request.query.getall("_tag", [])
+
+        if not tags:
+            return await self._async_table.get_all_runs(flow_name)
+
+        conditions = ["flow_id = %s"]
+        values = [flow_name]
+        conditions.append(
+            "tags||system_tags ?& array[{}]".format(
+                ",".join(["%s"] * len(tags))
+            )
+        )
+        values.extend(tags)
+
+        response, _ = await self._async_table.find_records(
+            conditions=conditions, values=values
+        )
+        return response
 
     @format_response
     @handle_exceptions
