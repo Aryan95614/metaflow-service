@@ -5,7 +5,7 @@ from services.data.db_utils import DBResponse
 from services.data.models import RunRow
 from services.utils import has_heartbeat_capable_version_tag, read_body
 from services.metadata_service.api.utils import format_response, \
-    handle_exceptions
+    handle_exceptions, tag_conditions
 from services.data.postgres_async_db import AsyncPostgresDB
 
 
@@ -73,9 +73,9 @@ class RunApi(object):
           description: "flow_id"
           required: true
           type: "string"
-        - name: "_tag"
+        - name: "_tags"
           in: "query"
-          description: "Filter by tag value. Matches against both user tags and system tags. Can be specified multiple times; all tags must match (AND logic)."
+          description: "Filter by tag values (comma-separated). Matches against both user tags and system tags. All tags must match (AND logic)."
           required: false
           type: "string"
         produces:
@@ -87,19 +87,13 @@ class RunApi(object):
                 description: invalid HTTP Method
         """
         flow_name = request.match_info.get("flow_id")
-        tags = request.query.getall("_tag", [])
+        tag_conds, tag_vals = tag_conditions(request.query)
 
-        if not tags:
+        if not tag_conds:
             return await self._async_table.get_all_runs(flow_name)
 
-        conditions = ["flow_id = %s"]
-        values = [flow_name]
-        conditions.append(
-            "tags||system_tags ?& array[{}]".format(
-                ",".join(["%s"] * len(tags))
-            )
-        )
-        values.extend(tags)
+        conditions = ["flow_id = %s"] + tag_conds
+        values = [flow_name] + tag_vals
 
         response, _ = await self._async_table.find_records(
             conditions=conditions, values=values

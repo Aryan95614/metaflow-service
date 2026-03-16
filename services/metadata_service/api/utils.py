@@ -63,3 +63,27 @@ def handle_exceptions(func):
             return http_500(str(err))
 
     return wrapper
+
+
+def tag_conditions(query):
+    """Build SQL conditions for tag filtering from query parameters.
+
+    Supports the _tags parameter with comma-separated values.
+    Uses the JSONB ?& operator to match all specified tags
+    against the combined tags and system_tags columns.
+
+    Returns (conditions, values) tuple to be passed to find_records().
+    """
+    raw = query.get("_tags", "")
+    if not raw:
+        return [], []
+
+    tags = [t.strip() for t in raw.split(",") if t.strip()]
+    if not tags:
+        return [], []
+
+    condition = (
+        "COALESCE(tags, '[]'::jsonb) || COALESCE(system_tags, '[]'::jsonb) "
+        "?& array[{}]".format(",".join(["%s"] * len(tags)))
+    )
+    return [condition], list(tags)

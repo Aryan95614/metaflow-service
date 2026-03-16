@@ -2,7 +2,7 @@ from services.data import FlowRow
 from services.data.postgres_async_db import AsyncPostgresDB
 from services.utils import read_body
 from services.metadata_service.api.utils import format_response, \
-    handle_exceptions
+    handle_exceptions, tag_conditions
 import asyncio
 
 
@@ -100,9 +100,9 @@ class FlowApi(object):
         tags:
         - Flow
         parameters:
-        - name: "_tag"
+        - name: "_tags"
           in: "query"
-          description: "Filter by tag value. Matches against both user tags and system tags. Can be specified multiple times; all tags must match (AND logic)."
+          description: "Filter by tag values (comma-separated). Matches against both user tags and system tags. All tags must match (AND logic)."
           required: false
           type: "string"
         produces:
@@ -113,19 +113,12 @@ class FlowApi(object):
             "405":
                 description: invalid HTTP Method
         """
-        tags = request.query.getall("_tag", [])
+        tag_conds, tag_vals = tag_conditions(request.query)
 
-        if not tags:
+        if not tag_conds:
             return await self._async_table.get_all_flows()
 
-        conditions = [
-            "tags||system_tags ?& array[{}]".format(
-                ",".join(["%s"] * len(tags))
-            )
-        ]
-        values = list(tags)
-
         response, _ = await self._async_table.find_records(
-            conditions=conditions, values=values
+            conditions=tag_conds, values=tag_vals
         )
         return response
