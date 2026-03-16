@@ -99,6 +99,12 @@ class FlowApi(object):
         description: Get all flows
         tags:
         - Flow
+        parameters:
+        - name: "_tag"
+          in: "query"
+          description: "Filter by tag value. Matches against both user tags and system tags. Can be specified multiple times; all tags must match (AND logic)."
+          required: false
+          type: "string"
         produces:
         - text/plain
         responses:
@@ -107,4 +113,19 @@ class FlowApi(object):
             "405":
                 description: invalid HTTP Method
         """
-        return await self._async_table.get_all_flows()
+        tags = request.query.getall("_tag", [])
+
+        if not tags:
+            return await self._async_table.get_all_flows()
+
+        conditions = [
+            "tags||system_tags ?& array[{}]".format(
+                ",".join(["%s"] * len(tags))
+            )
+        ]
+        values = list(tags)
+
+        response, _ = await self._async_table.find_records(
+            conditions=conditions, values=values
+        )
+        return response
