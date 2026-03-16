@@ -96,11 +96,11 @@ class TestTagConditionsUtility:
         conditions, values = tag_conditions(query)
         assert values == ["user:alice@corp", "runtime:dev-v2.1"]
 
-    def test_coalesce_null_safety(self):
+    def test_uses_combined_tags_expression(self):
         query = CIMultiDictProxy(CIMultiDict({"_tags": "sometag"}))
         conditions, _ = tag_conditions(query)
-        assert "COALESCE(tags, '[]'::jsonb)" in conditions[0]
-        assert "COALESCE(system_tags, '[]'::jsonb)" in conditions[0]
+        assert "tags||system_tags" in conditions[0]
+        assert "?&" in conditions[0]
 
 
 class TestRunTagFiltering:

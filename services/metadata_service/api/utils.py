@@ -82,8 +82,7 @@ def tag_conditions(query):
     if not tags:
         return [], []
 
-    condition = (
-        "COALESCE(tags, '[]'::jsonb) || COALESCE(system_tags, '[]'::jsonb) "
-        "?& array[{}]".format(",".join(["%s"] * len(tags)))
+    condition = "tags||system_tags ?& array[{}]".format(
+        ",".join(["%s"] * len(tags))
     )
     return [condition], list(tags)
