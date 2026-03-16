@@ -13,10 +13,7 @@ GET /flows?_limit=100
 GET /flows/MyFlow/runs?_limit=50
 ```
 
-Response comes back ordered by `ts_epoch DESC`. If there's more data, you get two headers back:
-
-- `X-Next-Cursor` - the ts_epoch to pass on the next request
-- `X-Has-More` - `"true"` or `"false"`
+Response comes back ordered by `ts_epoch DESC`. If there's more data, the response includes an `X-Next-Cursor` header with the ts_epoch to pass on the next request.
 
 To get the next page, pass the cursor back:
 
@@ -38,9 +35,9 @@ while True:
     resp = http_get("/flows/MyFlow/runs", params=params)
     results.extend(resp.json())
 
-    if resp.headers.get("X-Has-More") != "true":
+    cursor = resp.headers.get("X-Next-Cursor")
+    if not cursor:
         break
-    cursor = resp.headers["X-Next-Cursor"]
 ```
 
 If you don't send `_limit` or `_cursor`, the server behaves exactly like before. No new headers, full result set, nothing changes.
@@ -71,4 +68,4 @@ Single-resource GETs like `GET /flows/{flow_id}` are not affected.
 
 **ts_epoch ties.** If two records have the same ts_epoch they could theoretically end up on different pages. Rare in practice since timestamps are millisecond-precision, but possible during bulk inserts.
 
-**Artifact filtering.** The artifact endpoints run `filter_artifacts_for_latest_attempt` *after* the page slice, so you might get fewer than `_limit` items back even when `X-Has-More` is true. Check the header, not the array length.
+**Artifact filtering.** The artifact endpoints run `filter_artifacts_for_latest_attempt` *after* the page slice, so you might get fewer than `_limit` items back even when `X-Next-Cursor` is present. Check the header, not the array length.

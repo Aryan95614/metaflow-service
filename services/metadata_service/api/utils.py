@@ -63,3 +63,51 @@ def handle_exceptions(func):
             return http_500(str(err))
 
     return wrapper
+
+
+def parse_pagination_params(query):
+    _limit = query.get("_limit")
+    _cursor = query.get("_cursor")
+
+    if _limit is None and _cursor is None:
+        return None
+
+    if _cursor is not None and _limit is None:
+        return web.Response(
+            status=400,
+            body=json.dumps(
+                {"error": "_limit is required when using _cursor"}),
+            headers=MultiDict(
+                {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
+    try:
+        page_limit = int(_limit) if _limit else 0
+        if _limit is not None and page_limit < 0:
+            raise ValueError()
+    except ValueError:
+        return web.Response(
+            status=400,
+            body=json.dumps(
+                {"error": "Invalid value for _limit: must be a positive integer"}),
+            headers=MultiDict(
+                {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
+    try:
+        cursor_value = int(_cursor) if _cursor is not None else None
+    except ValueError:
+        return web.Response(
+            status=400,
+            body=json.dumps(
+                {"error": "Invalid value for _cursor: must be an integer"}),
+            headers=MultiDict(
+                {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+
+    return page_limit, cursor_value
+
+
+def paginate_records(records, page_limit):
+    headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
+    if page_limit > 0 and len(records) > page_limit:
+        records = records[:page_limit]
+        headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
+    return records, headers

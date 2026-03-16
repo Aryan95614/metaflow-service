@@ -9,7 +9,8 @@ from services.data.postgres_async_db import AsyncPostgresDB
 from services.data.tagging_utils import apply_run_tags_to_db_response
 from services.utils import has_heartbeat_capable_version_tag, read_body
 from services.metadata_service.api.utils import format_response, \
-    handle_exceptions, http_500, METADATA_SERVICE_HEADER, METADATA_SERVICE_VERSION
+    handle_exceptions, http_500, parse_pagination_params, paginate_records, \
+    METADATA_SERVICE_HEADER, METADATA_SERVICE_VERSION
 
 
 class TaskApi(object):
@@ -83,10 +84,9 @@ class TaskApi(object):
             flow_id = request.match_info.get("flow_id")
             run_number = request.match_info.get("run_number")
             step_name = request.match_info.get("step_name")
-            _limit = request.query.get("_limit")
-            _cursor = request.query.get("_cursor")
+            parsed = parse_pagination_params(request.query)
 
-            if _limit is None and _cursor is None:
+            if parsed is None:
                 db_response = await self._async_table.get_tasks(flow_id, run_number, step_name)
                 db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
                 return web.Response(
@@ -95,36 +95,10 @@ class TaskApi(object):
                     headers=MultiDict(
                         {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
-            if _cursor is not None and _limit is None:
-                return web.Response(
-                    status=400,
-                    body=json.dumps(
-                        {"error": "_limit is required when using _cursor"}),
-                    headers=MultiDict(
-                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
+            if isinstance(parsed, web.Response):
+                return parsed
 
-            try:
-                page_limit = int(_limit) if _limit else 0
-                if _limit is not None and page_limit < 0:
-                    raise ValueError()
-            except ValueError:
-                return web.Response(
-                    status=400,
-                    body=json.dumps(
-                        {"error": "Invalid value for _limit: must be a positive integer"}),
-                    headers=MultiDict(
-                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
-
-            try:
-                cursor_value = int(_cursor) if _cursor is not None else None
-            except ValueError:
-                return web.Response(
-                    status=400,
-                    body=json.dumps(
-                        {"error": "Invalid value for _cursor: must be an integer"}),
-                    headers=MultiDict(
-                        {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
-
+            page_limit, cursor_value = parsed
             run_key, run_value = translate_run_key(run_number)
             conditions = ["flow_id = %s", "{} = %s".format(run_key), "step_name = %s"]
             values = [flow_id, run_value, step_name]
@@ -150,15 +124,7 @@ class TaskApi(object):
                         {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
-            records = db_response.body
-            headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
-
-            if page_limit > 0:
-                has_more = len(records) > page_limit
-                if has_more:
-                    records = records[:page_limit]
-                    headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
-                headers["X-Has-More"] = str(has_more).lower()
+            records, headers = paginate_records(db_response.body, page_limit)
 
             return web.Response(
                 status=200,

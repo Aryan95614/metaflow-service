@@ -69,7 +69,7 @@ class TestRunPagination:
         assert resp.status == 200
         body = json.loads(resp.text)
         assert len(body) == 5
-        assert "X-Has-More" not in resp.headers
+        assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
     async def test_limit_returns_page_with_headers(self):
@@ -85,7 +85,7 @@ class TestRunPagination:
         assert resp.status == 200
         body = json.loads(resp.text)
         assert len(body) == 3
-        assert resp.headers["X-Has-More"] == "true"
+        assert "X-Next-Cursor" in resp.headers
         assert "X-Next-Cursor" in resp.headers
 
     @pytest.mark.asyncio
@@ -102,7 +102,7 @@ class TestRunPagination:
         assert resp.status == 200
         body = json.loads(resp.text)
         assert len(body) == 2
-        assert resp.headers["X-Has-More"] == "false"
+        assert "X-Next-Cursor" not in resp.headers
         assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
@@ -163,7 +163,7 @@ class TestRunPagination:
         assert resp.status == 200
         body = json.loads(resp.text)
         assert body == []
-        assert resp.headers["X-Has-More"] == "false"
+        assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
     async def test_cursor_passed_to_find_records(self):
@@ -204,7 +204,7 @@ class TestFlowPagination:
         resp = await self.api.get_all_flows(req)
 
         assert resp.status == 200
-        assert "X-Has-More" not in resp.headers
+        assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
     async def test_cursor_without_limit_returns_400(self):
@@ -247,7 +247,7 @@ class TestStepPagination:
         resp = await self.api.get_steps(req)
 
         assert resp.status == 200
-        assert "X-Has-More" not in resp.headers
+        assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
     async def test_cursor_without_limit_returns_400(self):
@@ -287,7 +287,7 @@ class TestTaskPagination:
         resp = await self.api.get_tasks(req)
 
         assert resp.status == 200
-        assert "X-Has-More" not in resp.headers
+        assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
     async def test_cursor_without_limit_returns_400(self):
@@ -322,7 +322,7 @@ class TestMetadataPagination:
         resp = await self.api.get_metadata(req)
 
         assert resp.status == 200
-        assert "X-Has-More" not in resp.headers
+        assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
     async def test_cursor_without_limit_get_metadata(self):
@@ -344,7 +344,7 @@ class TestMetadataPagination:
         resp = await self.api.get_metadata_by_run(req)
 
         assert resp.status == 200
-        assert "X-Has-More" not in resp.headers
+        assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
     async def test_paginated_metadata_by_run(self):
@@ -360,7 +360,7 @@ class TestMetadataPagination:
         assert resp.status == 200
         body = json.loads(resp.text)
         assert len(body) == 3
-        assert resp.headers["X-Has-More"] == "true"
+        assert "X-Next-Cursor" in resp.headers
         assert "X-Next-Cursor" in resp.headers
 
 
@@ -427,7 +427,7 @@ class TestArtifactPaginationByTask:
         DB returns 4 raw records (limit+1 trick with _limit=3).
         Raw records include mixed attempts. After trim to 3, the
         filter removes old-attempt artifacts. The response body is
-        smaller than page_limit, but X-Has-More and X-Next-Cursor
+        smaller than page_limit, but X-Next-Cursor
         still reflect the raw boundary.
         """
         # 4 records: task 1 has attempts 0 and 1
@@ -453,7 +453,7 @@ class TestArtifactPaginationByTask:
         assert all(a["attempt_id"] == 1 for a in body)
 
         # pagination headers reflect raw records, not filtered
-        assert resp.headers["X-Has-More"] == "true"
+        assert "X-Next-Cursor" in resp.headers
         # cursor should be ts_epoch of 3rd raw record (index 2), which is 999800
         assert resp.headers["X-Next-Cursor"] == "999800"
 
@@ -474,7 +474,7 @@ class TestArtifactPaginationByTask:
         assert resp.status == 200
         body = json.loads(resp.text)
         assert len(body) == 2
-        assert resp.headers["X-Has-More"] == "false"
+        assert "X-Next-Cursor" not in resp.headers
         assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
@@ -524,7 +524,7 @@ class TestArtifactPaginationByTask:
         # filter sees attempt 0 as max on this page, keeps both
         assert len(body) == 2
         assert all(a["attempt_id"] == 0 for a in body)
-        assert resp.headers["X-Has-More"] == "true"
+        assert "X-Next-Cursor" in resp.headers
 
 
 class TestArtifactPaginationByStep:
@@ -564,7 +564,7 @@ class TestArtifactPaginationByStep:
         assert resp.status == 200
         body = json.loads(resp.text)
         assert len(body) == 2
-        assert resp.headers["X-Has-More"] == "true"
+        assert "X-Next-Cursor" in resp.headers
 
     @pytest.mark.asyncio
     async def test_cursor_without_limit_returns_400(self):
@@ -611,7 +611,7 @@ class TestArtifactPaginationByRun:
         assert resp.status == 200
         body = json.loads(resp.text)
         assert len(body) == 2
-        assert resp.headers["X-Has-More"] == "true"
+        assert "X-Next-Cursor" in resp.headers
         assert resp.headers["X-Next-Cursor"] == "999800"
 
     @pytest.mark.asyncio
@@ -628,7 +628,7 @@ class TestArtifactPaginationByRun:
         resp = await self.api.get_artifacts_by_run(req)
 
         assert resp.status == 200
-        assert resp.headers["X-Has-More"] == "false"
+        assert "X-Next-Cursor" not in resp.headers
         assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio

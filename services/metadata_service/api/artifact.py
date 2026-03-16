@@ -15,6 +15,7 @@ from services.metadata_service.api.utils import (
     format_response,
     handle_exceptions,
     http_500,
+    parse_pagination_params,
     METADATA_SERVICE_HEADER,
     METADATA_SERVICE_VERSION,
 )
@@ -232,10 +233,9 @@ class ArtificatsApi(object):
         run_number = request.match_info.get("run_number")
         step_name = request.match_info.get("step_name")
         task_id = request.match_info.get("task_id")
-        _limit = request.query.get("_limit")
-        _cursor = request.query.get("_cursor")
+        parsed = parse_pagination_params(request.query)
 
-        if _limit is None and _cursor is None:
+        if parsed is None:
             db_response = await self._async_table.get_artifact_in_task(
                 flow_id, run_number, step_name, task_id
             )
@@ -251,12 +251,10 @@ class ArtificatsApi(object):
                     body=json.dumps(http_500(db_response.body)),
                 )
 
-        error_response = _validate_pagination_params(_limit, _cursor)
-        if error_response is not None:
-            return error_response
+        if isinstance(parsed, web.Response):
+            return parsed
 
-        page_limit = int(_limit) if _limit else 0
-        cursor_value = int(_cursor) if _cursor is not None else None
+        page_limit, cursor_value = parsed
 
         try:
             run_key, run_value = translate_run_key(run_number)
@@ -287,18 +285,12 @@ class ArtificatsApi(object):
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
             records = db_response.body
             headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
-            has_more = False
 
-            if page_limit > 0:
-                has_more = len(records) > page_limit
-                if has_more:
-                    records = records[:page_limit]
-                headers["X-Has-More"] = str(has_more).lower()
+            if page_limit > 0 and len(records) > page_limit:
+                records = records[:page_limit]
+                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
 
             filtered_records = filter_artifacts_for_latest_attempt(records)
-
-            if has_more:
-                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
 
             return web.Response(
                 status=200,
@@ -422,10 +414,9 @@ class ArtificatsApi(object):
         flow_id = request.match_info.get("flow_id")
         run_number = request.match_info.get("run_number")
         step_name = request.match_info.get("step_name")
-        _limit = request.query.get("_limit")
-        _cursor = request.query.get("_cursor")
+        parsed = parse_pagination_params(request.query)
 
-        if _limit is None and _cursor is None:
+        if parsed is None:
             db_response = await self._async_table.get_artifact_in_steps(
                 flow_id, run_number, step_name
             )
@@ -441,12 +432,10 @@ class ArtificatsApi(object):
                     body=json.dumps(http_500(db_response.body)),
                 )
 
-        error_response = _validate_pagination_params(_limit, _cursor)
-        if error_response is not None:
-            return error_response
+        if isinstance(parsed, web.Response):
+            return parsed
 
-        page_limit = int(_limit) if _limit else 0
-        cursor_value = int(_cursor) if _cursor is not None else None
+        page_limit, cursor_value = parsed
 
         try:
             run_key, run_value = translate_run_key(run_number)
@@ -476,18 +465,12 @@ class ArtificatsApi(object):
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
             records = db_response.body
             headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
-            has_more = False
 
-            if page_limit > 0:
-                has_more = len(records) > page_limit
-                if has_more:
-                    records = records[:page_limit]
-                headers["X-Has-More"] = str(has_more).lower()
+            if page_limit > 0 and len(records) > page_limit:
+                records = records[:page_limit]
+                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
 
             filtered_records = filter_artifacts_for_latest_attempt(records)
-
-            if has_more:
-                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
 
             return web.Response(
                 status=200,
@@ -538,10 +521,9 @@ class ArtificatsApi(object):
         """
         flow_id = request.match_info.get("flow_id")
         run_number = request.match_info.get("run_number")
-        _limit = request.query.get("_limit")
-        _cursor = request.query.get("_cursor")
+        parsed = parse_pagination_params(request.query)
 
-        if _limit is None and _cursor is None:
+        if parsed is None:
             db_response = await self._async_table.get_artifacts_in_runs(flow_id, run_number)
             if db_response.response_code == 200:
                 db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
@@ -555,12 +537,10 @@ class ArtificatsApi(object):
                     body=json.dumps(http_500(db_response.body)),
                 )
 
-        error_response = _validate_pagination_params(_limit, _cursor)
-        if error_response is not None:
-            return error_response
+        if isinstance(parsed, web.Response):
+            return parsed
 
-        page_limit = int(_limit) if _limit else 0
-        cursor_value = int(_cursor) if _cursor is not None else None
+        page_limit, cursor_value = parsed
 
         try:
             run_key, run_value = translate_run_key(run_number)
@@ -590,18 +570,12 @@ class ArtificatsApi(object):
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
             records = db_response.body
             headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
-            has_more = False
 
-            if page_limit > 0:
-                has_more = len(records) > page_limit
-                if has_more:
-                    records = records[:page_limit]
-                headers["X-Has-More"] = str(has_more).lower()
+            if page_limit > 0 and len(records) > page_limit:
+                records = records[:page_limit]
+                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
 
             filtered_records = filter_artifacts_for_latest_attempt(records)
-
-            if has_more:
-                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
 
             return web.Response(
                 status=200,
@@ -726,37 +700,3 @@ class ArtificatsApi(object):
         result = {"artifacts_created": count}
 
         return web.Response(body=json.dumps(result))
-
-
-def _validate_pagination_params(_limit, _cursor):
-    if _cursor is not None and _limit is None:
-        return web.Response(
-            status=400,
-            body=json.dumps(
-                {"error": "_limit is required when using _cursor"}),
-            headers=MultiDict(
-                {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
-
-    try:
-        page_limit = int(_limit) if _limit else 0
-        if _limit is not None and page_limit < 0:
-            raise ValueError()
-    except ValueError:
-        return web.Response(
-            status=400,
-            body=json.dumps(
-                {"error": "Invalid value for _limit: must be a positive integer"}),
-            headers=MultiDict(
-                {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
-
-    try:
-        int(_cursor) if _cursor is not None else None
-    except ValueError:
-        return web.Response(
-            status=400,
-            body=json.dumps(
-                {"error": "Invalid value for _cursor: must be an integer"}),
-            headers=MultiDict(
-                {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
-
-    return None
