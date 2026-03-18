@@ -1,0 +1,37 @@
+# Build goose, pinned to same version as production
+FROM golang:1.18.9-buster AS goose
+RUN go install github.com/pressly/goose/v3/cmd/goose@v3.5.3
+
+# Shared base for all dev services
+FROM python:3.7 AS base
+ADD services /root/services
+ADD setup.py setup.cfg /root/
+WORKDIR /root
+RUN pip install --editable .
+
+# --- targets ---
+
+FROM base AS metadata
+CMD ["metadata_service"]
+
+FROM base AS migration
+COPY --from=goose /go/bin/goose /usr/local/bin/
+ADD run_goose.py /root/
+CMD ["migration_service"]
+
+FROM base AS ui
+ARG UI_ENABLED="1"
+ARG UI_VERSION="v1.2.5"
+ENV UI_ENABLED=$UI_ENABLED
+ENV UI_VERSION=$UI_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/*
+RUN /root/services/ui_backend_service/download_ui.sh
+CMD ["ui_backend_service"]
+
+FROM python:3.7 AS test
+COPY --from=goose /go/bin/goose /usr/local/bin/
+RUN pip install tox
+COPY . /app
+WORKDIR /app
+CMD ["/app/wait-for-postgres.sh", "tox"]

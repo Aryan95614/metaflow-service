@@ -3,7 +3,8 @@ services:
   ui_backend:
     build:
       context: .
-      dockerfile: Dockerfile.ui_service
+      dockerfile: Dockerfile.dev
+      target: ui
       args:
         UI_ENABLED: 1
     ports:
@@ -53,7 +54,8 @@ services:
   metadata:
     build:
       context: .
-      dockerfile: Dockerfile.metadata_service
+      dockerfile: Dockerfile.dev
+      target: metadata
     ports:
       - "${MF_METADATA_PORT:-8080}:${MF_METADATA_PORT:-8080}"
     volumes:
@@ -70,10 +72,11 @@ services:
     depends_on:
       - migration
   migration:
-    command: ["/opt/latest/bin/python3", "/root/run_goose.py"]
+    command: ["python3", "/root/run_goose.py"]
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
+      target: migration
     volumes:
       - ./services:/root/services
     environment:
