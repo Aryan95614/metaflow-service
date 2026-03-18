@@ -7,7 +7,7 @@ from services.data.db_utils import translate_run_key
 from services.data.tagging_utils import apply_run_tags_to_db_response
 from services.utils import read_body
 from services.metadata_service.api.utils import format_response, \
-    handle_exceptions, http_500, parse_pagination_params, paginate_records, \
+    handle_exceptions, http_500, parse_pagination_params, paginate_response, \
     METADATA_SERVICE_HEADER, METADATA_SERVICE_VERSION
 from services.data.postgres_async_db import AsyncPostgresDB
 
@@ -110,7 +110,7 @@ class StepApi(object):
                         {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
-            records, headers = paginate_records(db_response.body, page_limit)
+            records, headers = paginate_response(db_response.body, page_limit)
 
             return web.Response(
                 status=200,

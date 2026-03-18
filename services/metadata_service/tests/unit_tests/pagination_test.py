@@ -86,10 +86,9 @@ class TestRunPagination:
         body = json.loads(resp.text)
         assert len(body) == 3
         assert "X-Next-Cursor" in resp.headers
-        assert "X-Next-Cursor" in resp.headers
 
     @pytest.mark.asyncio
-    async def test_last_page_has_more_false(self):
+    async def test_last_page_no_cursor(self):
         records = _sample_records(2)
         self.mock_table.find_records = AsyncMock(
             return_value=(_make_db_response(records), _make_pagination()))
@@ -102,7 +101,6 @@ class TestRunPagination:
         assert resp.status == 200
         body = json.loads(resp.text)
         assert len(body) == 2
-        assert "X-Next-Cursor" not in resp.headers
         assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
@@ -361,7 +359,6 @@ class TestMetadataPagination:
         body = json.loads(resp.text)
         assert len(body) == 3
         assert "X-Next-Cursor" in resp.headers
-        assert "X-Next-Cursor" in resp.headers
 
 
 def _artifact_records(specs, base_ts=1000000):
@@ -474,7 +471,6 @@ class TestArtifactPaginationByTask:
         assert resp.status == 200
         body = json.loads(resp.text)
         assert len(body) == 2
-        assert "X-Next-Cursor" not in resp.headers
         assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio
@@ -628,7 +624,6 @@ class TestArtifactPaginationByRun:
         resp = await self.api.get_artifacts_by_run(req)
 
         assert resp.status == 200
-        assert "X-Next-Cursor" not in resp.headers
         assert "X-Next-Cursor" not in resp.headers
 
     @pytest.mark.asyncio

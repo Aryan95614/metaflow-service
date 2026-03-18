@@ -16,6 +16,7 @@ from services.metadata_service.api.utils import (
     handle_exceptions,
     http_500,
     parse_pagination_params,
+    paginate_response,
     METADATA_SERVICE_HEADER,
     METADATA_SERVICE_VERSION,
 )
@@ -283,12 +284,7 @@ class ArtificatsApi(object):
                         {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
-            records = db_response.body
-            headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
-
-            if page_limit > 0 and len(records) > page_limit:
-                records = records[:page_limit]
-                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
+            records, headers = paginate_response(db_response.body, page_limit)
 
             filtered_records = filter_artifacts_for_latest_attempt(records)
 
@@ -463,12 +459,7 @@ class ArtificatsApi(object):
                         {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
-            records = db_response.body
-            headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
-
-            if page_limit > 0 and len(records) > page_limit:
-                records = records[:page_limit]
-                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
+            records, headers = paginate_response(db_response.body, page_limit)
 
             filtered_records = filter_artifacts_for_latest_attempt(records)
 
@@ -568,12 +559,7 @@ class ArtificatsApi(object):
                         {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
             db_response = await apply_run_tags_to_db_response(flow_id, run_number, self._async_run_table, db_response)
-            records = db_response.body
-            headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
-
-            if page_limit > 0 and len(records) > page_limit:
-                records = records[:page_limit]
-                headers["X-Next-Cursor"] = str(records[-1]["ts_epoch"])
+            records, headers = paginate_response(db_response.body, page_limit)
 
             filtered_records = filter_artifacts_for_latest_attempt(records)
 

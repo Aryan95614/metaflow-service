@@ -105,7 +105,7 @@ def parse_pagination_params(query):
     return page_limit, cursor_value
 
 
-def paginate_records(records, page_limit):
+def paginate_response(records, page_limit):
     headers = {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}
     if page_limit > 0 and len(records) > page_limit:
         records = records[:page_limit]

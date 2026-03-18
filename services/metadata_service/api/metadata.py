@@ -6,7 +6,7 @@ from multidict import MultiDict
 from services.data.db_utils import translate_run_key, translate_task_key
 from services.utils import read_body
 from services.metadata_service.api.utils import format_response, \
-    handle_exceptions, http_500, parse_pagination_params, paginate_records, \
+    handle_exceptions, http_500, parse_pagination_params, paginate_response, \
     METADATA_SERVICE_HEADER, METADATA_SERVICE_VERSION
 from services.data.postgres_async_db import AsyncPostgresDB
 
@@ -128,7 +128,7 @@ class MetadataApi(object):
                     headers=MultiDict(
                         {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
-            records, headers = paginate_records(db_response.body, page_limit)
+            records, headers = paginate_response(db_response.body, page_limit)
 
             return web.Response(
                 status=200,
@@ -220,7 +220,7 @@ class MetadataApi(object):
                     headers=MultiDict(
                         {METADATA_SERVICE_HEADER: METADATA_SERVICE_VERSION}))
 
-            records, headers = paginate_records(db_response.body, page_limit)
+            records, headers = paginate_response(db_response.body, page_limit)
 
             return web.Response(
                 status=200,
