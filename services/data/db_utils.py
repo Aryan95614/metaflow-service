@@ -11,6 +11,15 @@ DBResponse = collections.namedtuple("DBResponse", "response_code body")
 
 DBPagination = collections.namedtuple("DBPagination", "limit offset count page")
 
+# Postgres integer type limits
+PG_INT4_MAX = 2147483647
+PG_INT8_MAX = 9223372036854775807
+
+
+class IdOverflowError(ValueError):
+    """Raised when a numeric ID exceeds Postgres integer range."""
+    pass
+
 
 def aiopg_exception_handling(exception):
     err_msg = str(exception)
@@ -62,12 +71,22 @@ def new_heartbeat_ts():
 
 def translate_run_key(v: str):
     value = str(v)
-    return "run_number" if value.isnumeric() else "run_id", value
+    if value.isnumeric():
+        if int(value) > PG_INT4_MAX:
+            raise IdOverflowError(
+                "run_number %s is out of range for type integer" % value)
+        return "run_number", value
+    return "run_id", value
 
 
 def translate_task_key(v: str):
     value = str(v)
-    return "task_id" if value.isnumeric() else "task_name", value
+    if value.isnumeric():
+        if int(value) > PG_INT8_MAX:
+            raise IdOverflowError(
+                "task_id %s is out of range for type bigint" % value)
+        return "task_id", value
+    return "task_name", value
 
 
 def get_exposed_run_id(run_number, run_id):

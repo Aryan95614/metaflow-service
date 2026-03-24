@@ -6,6 +6,7 @@ import collections
 from aiohttp import web
 from multidict import MultiDict
 
+from services.data.db_utils import IdOverflowError
 from services.utils import get_traceback_str
 
 version = pkg_resources.require("metadata_service")[0].version
@@ -59,6 +60,8 @@ def handle_exceptions(func):
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
+        except IdOverflowError as err:
+            return ServiceResponse(400, {"error": str(err)})
         except Exception as err:
             return http_500(str(err))
 
