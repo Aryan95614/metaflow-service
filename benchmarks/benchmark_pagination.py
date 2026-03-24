@@ -143,14 +143,53 @@ def seed_data():
          json.dumps(["benchmark"]), json.dumps(["runtime:dev"])),
     )
 
+    # dry run: insert one row and query it back to confirm schema is correct
+    ts_now = int(time.time() * 1000)
+    cur.execute(
+        """INSERT INTO runs_v3
+           (flow_id, user_name, ts_epoch, tags, system_tags, run_id, last_heartbeat_ts)
+           VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+           RETURNING run_number""",
+        (FLOW_ID, "benchmark", ts_now,
+         json.dumps(["benchmark"]), json.dumps(["runtime:dev"]),
+         "dry_run_check", ts_now),
+    )
+    dry_run_num = cur.fetchone()[0]
+    cur.execute(
+        "SELECT flow_id, run_number, ts_epoch FROM runs_v3 WHERE run_number = %s",
+        (dry_run_num,),
+    )
+    row = cur.fetchone()
+    if not row or row[0] != FLOW_ID:
+        print("  dry run FAILED: could not read back inserted row")
+        conn.rollback()
+        cur.close()
+        conn.close()
+        sys.exit(1)
+    # delete the dry run row
+    cur.execute("DELETE FROM runs_v3 WHERE run_number = %s", (dry_run_num,))
+    conn.commit()
+    print("  dry run passed: schema is correct")
+
     # seed runs with realistic spread
+    # runs_v3 schema (after migrations):
+    #   flow_id VARCHAR(255) NOT NULL
+    #   run_number SERIAL NOT NULL (auto-generated)
+    #   user_name VARCHAR(255)
+    #   ts_epoch BIGINT NOT NULL
+    #   tags JSONB
+    #   system_tags JSONB
+    #   run_id VARCHAR(255)
+    #   last_heartbeat_ts BIGINT
     now_ms = int(time.time() * 1000)
     batch = []
     for i in range(NUM_RUNS):
         ts = now_ms - random.randint(0, THIRTY_DAYS_MS)
+        hb_ts = ts + random.randint(0, 60000)
+        run_id = "bench-%d" % i
         tags = make_tags()
         sys_tags = make_system_tags()
-        batch.append((FLOW_ID, "benchmark", ts, tags, sys_tags))
+        batch.append((FLOW_ID, "benchmark", ts, tags, sys_tags, run_id, hb_ts))
 
         if len(batch) >= 500:
             _insert_batch(cur, batch)
@@ -171,12 +210,13 @@ def seed_data():
 def _insert_batch(cur, batch):
     args_str = ",".join(
         cur.mogrify(
-            "(%s, %s, %s, %s::jsonb, %s::jsonb)", row
+            "(%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)", row
         ).decode("utf-8")
         for row in batch
     )
     cur.execute(
-        "INSERT INTO runs_v3 (flow_id, user_name, ts_epoch, tags, system_tags) "
+        "INSERT INTO runs_v3 "
+        "(flow_id, user_name, ts_epoch, tags, system_tags, run_id, last_heartbeat_ts) "
         "VALUES " + args_str
     )
 
