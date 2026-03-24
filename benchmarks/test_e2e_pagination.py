@@ -14,7 +14,6 @@ Usage:
 
 import json
 import os
-import random
 import sys
 import time
 
@@ -147,14 +146,15 @@ def test_paginated_walk():
 
     all_records = []
     page_count = 0
+    max_pages = 1000  # safety break
     url = "%s/flows/%s/runs?_limit=%d" % (base, FLOW_ID, PAGE_SIZE)
 
-    while url:
+    while url and page_count < max_pages:
         resp = session.get(url)
         if resp.status_code != 200:
             print("  FAIL: page %d returned %d: %s" % (
                 page_count + 1, resp.status_code, resp.text[:200]))
-            return None
+            return None, 0
         page = resp.json()
         page_count += 1
         all_records.extend(page)
@@ -167,7 +167,7 @@ def test_paginated_walk():
             url = None
 
     print("  fetched %d records across %d pages" % (len(all_records), page_count))
-    return all_records
+    return all_records, page_count
 
 
 def run_tests():
@@ -177,7 +177,7 @@ def run_tests():
     print("running pagination e2e tests...\n")
     wait_for_service()
 
-    records = test_paginated_walk()
+    records, page_count = test_paginated_walk()
     if records is None:
         print("\n  FAIL: could not complete paginated walk")
         return False
@@ -212,10 +212,9 @@ def run_tests():
 
     # check 4: page count is correct (ceil(500/50) = 10)
     expected_pages = (NUM_RUNS + PAGE_SIZE - 1) // PAGE_SIZE
-    actual_pages = (len(records) + PAGE_SIZE - 1) // PAGE_SIZE
     all_passed &= check(
-        "expected ~%d pages" % expected_pages,
-        actual_pages == expected_pages,
+        "page count == %d (got %d)" % (expected_pages, page_count),
+        page_count == expected_pages,
     )
 
     # check 5: verify the unpaginated endpoint still returns all records
