@@ -63,7 +63,7 @@ class TestTagConditionsUtility:
         query = CIMultiDictProxy(CIMultiDict({"_tags": "env:prod"}))
         conditions, values = tag_conditions(query)
         assert len(conditions) == 1
-        assert "COALESCE" in conditions[0]
+        assert "tags||system_tags" in conditions[0]
         assert "?&" in conditions[0]
         assert values == ["env:prod"]
 
