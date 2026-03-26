@@ -546,7 +546,7 @@ class TestArtifactPaginationByStep:
     async def test_paginated_with_filter(self):
         raw = _artifact_records([
             (1, 1),   # kept
-            (2, 0),   # dropped — task 2 has attempt 1 later in list
+            (2, 0),   # dropped - task 2 has attempt 1 later in list
             (2, 1),   # kept
             (1, 1),   # overflow
         ])
