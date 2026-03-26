@@ -66,14 +66,7 @@ def handle_exceptions(func):
 
 
 def tag_conditions(query):
-    """Build SQL conditions for tag filtering from query parameters.
-
-    Supports the _tags parameter with comma-separated values.
-    Uses the JSONB ?& operator to match all specified tags
-    against the combined tags and system_tags columns.
-
-    Returns (conditions, values) tuple to be passed to find_records().
-    """
+    """Parse _tags from query, return (conditions, values) for find_records."""
     raw = query.get("_tags", "")
     if not raw:
         return [], []
