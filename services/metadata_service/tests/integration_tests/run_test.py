@@ -8,12 +8,19 @@ import time
 from .utils import (
     cli, db,
     assert_api_get_response, assert_api_post_response, compare_partial,
-    add_flow, add_run, assert_api_patch_response
+    add_flow, add_run, add_metadata, assert_api_patch_response
 )
+from services.data.postgres_async_db import RUN_INACTIVE_CUTOFF_TIME
 import pytest
 
 pytestmark = [pytest.mark.integration_tests]
 
+
+async def _run_numbers(cli, flow_id, query=""):
+    # the metadata service serves json as text/plain, so parse the body ourselves
+    resp = await cli.get("/flows/{flow_id}/runs{q}".format(flow_id=flow_id, q=query))
+    assert resp.status == 200
+    return {r["run_number"] for r in json.loads(await resp.text())}
 
 
 async def test_run_post(cli, db):
@@ -140,6 +147,96 @@ async def test_runs_get(cli, db):
 
     # getting runs for non-existent flow should return empty list
     await assert_api_get_response(cli, "/flows/NonExistentFlow/runs", status=200, data=[])
+
+
+async def test_runs_get_status_filter(cli, db):
+    # a run with a fresh heartbeat reads as "running"; one without ever reads as "failed".
+    # that's enough to exercise filtering without seeding attempt metadata.
+    _flow = (await add_flow(db, "StatusFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+
+    _running = (await add_run(db, flow_id=_flow["flow_id"],
+                              last_heartbeat_ts=int(time.time()))).body
+    _failed = (await add_run(db, flow_id=_flow["flow_id"])).body
+
+    flow_id = _flow["flow_id"]
+    assert await _run_numbers(cli, flow_id, "?status=running") == {_running["run_number"]}
+    assert await _run_numbers(cli, flow_id, "?status=failed") == {_failed["run_number"]}
+    # repeated param is an OR over statuses
+    assert await _run_numbers(cli, flow_id, "?status=running&status=failed") == \
+        {_running["run_number"], _failed["run_number"]}
+    # no filter still returns everything
+    assert await _run_numbers(cli, flow_id) == {_running["run_number"], _failed["run_number"]}
+
+
+async def test_runs_get_status_filter_completed(cli, db):
+    # a run whose 'end' step recorded a successful attempt reads as "completed".
+    # this is the path that actually exercises the attempt-metadata join.
+    _flow = (await add_flow(db, "DoneFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+
+    _done = (await add_run(db, flow_id=_flow["flow_id"])).body
+    await add_metadata(db, flow_id=_done["flow_id"], run_number=_done["run_number"],
+                       step_name="end", task_id=1,
+                       metadata={"field_name": "attempt_ok", "value": "true"})
+    _bare = (await add_run(db, flow_id=_flow["flow_id"])).body
+
+    flow_id = _flow["flow_id"]
+    assert await _run_numbers(cli, flow_id, "?status=completed") == {_done["run_number"]}
+    assert await _run_numbers(cli, flow_id, "?status=failed") == {_bare["run_number"]}
+
+
+async def test_runs_get_status_filter_rejects_unknown(cli, db):
+    _flow = (await add_flow(db, "BadFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    await add_run(db, flow_id=_flow["flow_id"])
+
+    resp = await cli.get("/flows/{flow_id}/runs?status=bogus".format(**_flow))
+    assert resp.status == 400
+
+
+async def test_runs_get_status_filter_classification(cli, db):
+    # one run per branch of the status expression, asserted as three disjoint buckets.
+    _flow = (await add_flow(db, "MatrixFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    now = int(time.time())
+
+    async def end_attempt_ok(run, ok):
+        await add_metadata(db, flow_id=run["flow_id"], run_number=run["run_number"],
+                           step_name="end", task_id=1,
+                           metadata={"field_name": "attempt_ok", "value": str(ok)})
+
+    # a successful end attempt wins even over a fresh heartbeat
+    _completed = (await add_run(db, flow_id=_flow["flow_id"], last_heartbeat_ts=now)).body
+    await end_attempt_ok(_completed, True)
+    # an explicitly unsuccessful end attempt
+    _failed_attempt = (await add_run(db, flow_id=_flow["flow_id"])).body
+    await end_attempt_ok(_failed_attempt, False)
+    # a heartbeat too old to still count as running
+    _stale = (await add_run(db, flow_id=_flow["flow_id"],
+                            last_heartbeat_ts=now - RUN_INACTIVE_CUTOFF_TIME - 60)).body
+    # a recent heartbeat with no end attempt
+    _running = (await add_run(db, flow_id=_flow["flow_id"], last_heartbeat_ts=now)).body
+
+    flow_id = _flow["flow_id"]
+    assert await _run_numbers(cli, flow_id, "?status=completed") == {_completed["run_number"]}
+    assert await _run_numbers(cli, flow_id, "?status=running") == {_running["run_number"]}
+    assert await _run_numbers(cli, flow_id, "?status=failed") == \
+        {_failed_attempt["run_number"], _stale["run_number"]}
+
+
+async def test_runs_get_status_filter_composes_with_pagination(cli, db):
+    # a filter has to ride on top of pagination: a limited page of "failed" runs must
+    # be the matching rows taken *after* filtering, not a limited slice that then gets
+    # filtered down.
+    _flow = (await add_flow(db, "PageFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+
+    failed = [(await add_run(db, flow_id=_flow["flow_id"])).body for _ in range(3)]
+    await add_run(db, flow_id=_flow["flow_id"], last_heartbeat_ts=int(time.time()))  # running
+
+    page = (await db.run_table_postgres.get_all_runs(
+        _flow["flow_id"], statuses=["failed"], limit=2, order=["run_number DESC"])).body
+
+    assert len(page) == 2
+    assert all(r["status"] == "failed" for r in page)
+    newest_two = sorted((r["run_number"] for r in failed), reverse=True)[:2]
+    assert [r["run_number"] for r in page] == newest_two
 
 
 async def test_run_get(cli, db):

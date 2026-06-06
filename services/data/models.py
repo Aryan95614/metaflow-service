@@ -43,6 +43,7 @@ class RunRow(object):
         tags=None,
         system_tags=None,
         last_heartbeat_ts=None,
+        status=None,
     ):
         self.flow_id = flow_id
         self.user_name = user_name
@@ -55,10 +56,12 @@ class RunRow(object):
 
         self.ts_epoch = ts_epoch
         self.last_heartbeat_ts = last_heartbeat_ts
+        # derived, only present when the row was fetched with the status join
+        self.status = status
 
     def serialize(self, expanded: bool = False):
         if expanded:
-            return {
+            body = {
                 "flow_id": self.flow_id,
                 "run_number": self.run_number,
                 "run_id": self.run_id,
@@ -69,7 +72,7 @@ class RunRow(object):
                 "last_heartbeat_ts": self.last_heartbeat_ts
             }
         else:
-            return {
+            body = {
                 "flow_id": self.flow_id,
                 "run_number": get_exposed_run_id(self.run_number, self.run_id),
                 "user_name": self.user_name,
@@ -78,6 +81,9 @@ class RunRow(object):
                 "system_tags": self.system_tags,
                 "last_heartbeat_ts": self.last_heartbeat_ts
             }
+        if self.status is not None:
+            body["status"] = self.status
+        return body
 
 
 class StepRow(object):

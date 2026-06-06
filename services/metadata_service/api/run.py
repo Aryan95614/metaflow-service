@@ -8,6 +8,9 @@ from services.metadata_service.api.utils import format_response, \
     handle_exceptions
 from services.data.postgres_async_db import AsyncPostgresDB
 
+# Statuses a run can be filtered by, matching the values the status query derives.
+SUPPORTED_RUN_STATUSES = {"running", "completed", "failed"}
+
 
 class RunApi(object):
     _run_table = None
@@ -73,6 +76,11 @@ class RunApi(object):
           description: "flow_id"
           required: true
           type: "string"
+        - name: "status"
+          in: "query"
+          description: "filter runs by status (running/completed/failed). repeat for OR."
+          required: false
+          type: "string"
         produces:
         - text/plain
         responses:
@@ -82,7 +90,12 @@ class RunApi(object):
                 description: invalid HTTP Method
         """
         flow_name = request.match_info.get("flow_id")
-        return await self._async_table.get_all_runs(flow_name)
+        statuses = request.query.getall("status", [])
+        unsupported = [s for s in statuses if s not in SUPPORTED_RUN_STATUSES]
+        if unsupported:
+            return DBResponse(response_code=400,
+                              body="unsupported status filter: %s" % ", ".join(unsupported))
+        return await self._async_table.get_all_runs(flow_name, statuses=statuses or None)
 
     @format_response
     @handle_exceptions

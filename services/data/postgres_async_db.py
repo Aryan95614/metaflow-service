@@ -35,6 +35,11 @@ METADATA_TABLE_NAME = os.environ.get("DB_TABLE_NAME_METADATA", "metadata_v3")
 ARTIFACT_TABLE_NAME = os.environ.get("DB_TABLE_NAME_ARTIFACT", "artifact_v3")
 DB_SCHEMA_NAME = os.environ.get("DB_SCHEMA_NAME", "public")
 
+# Time before a run with a heartbeat is considered inactive (and thus failed).
+# Default 6 minutes (in seconds). Kept in sync with the ui_backend definition so
+# that status filtering here agrees with the status the UI reports.
+RUN_INACTIVE_CUTOFF_TIME = int(os.environ.get("RUN_INACTIVE_CUTOFF_TIME", 60 * 6))
+
 operator_match = re.compile('([^:]*):([=><]+)$')
 
 # use a ddmmyyy timestamp as the version for triggers
@@ -583,8 +588,73 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
             "user_name", "ts_epoch", "last_heartbeat_ts", "tags", "system_tags"]
     primary_keys = ["flow_id", "run_number"]
     trigger_keys = primary_keys + ["last_heartbeat_ts"]
-    select_columns = keys
     flow_table_name = AsyncFlowTablePostgres.table_name
+
+    # Derived run status (running/completed/failed). This mirrors the definition in
+    # ui_backend_service so filtering agrees with what the UI shows. The two lateral
+    # joins below pull the 'end' step's attempt metadata that the status depends on.
+    # Only used when joins are enabled (i.e. when filtering by status), so the plain
+    # get_all_runs path stays a simple, join-free query.
+    joins = [
+        """
+        LEFT JOIN LATERAL (
+            SELECT
+                ts_epoch,
+                (CASE
+                    WHEN pg_typeof(value)='jsonb'::regtype
+                    THEN value::jsonb->>0
+                    ELSE value::text
+                END)::boolean as value
+            FROM {metadata_table} as attempt_ok
+            WHERE
+                {table_name}.flow_id = attempt_ok.flow_id AND
+                {table_name}.run_number = attempt_ok.run_number AND
+                attempt_ok.step_name = 'end' AND
+                attempt_ok.field_name = 'attempt_ok'
+            ORDER BY ts_epoch DESC
+            LIMIT 1
+        ) as end_attempt_ok ON true
+        """.format(table_name=RUN_TABLE_NAME, metadata_table=METADATA_TABLE_NAME),
+        """
+        LEFT JOIN LATERAL (
+            SELECT ts_epoch
+            FROM {metadata_table} as attempt
+            WHERE
+                {table_name}.flow_id = attempt.flow_id AND
+                {table_name}.run_number = attempt.run_number AND
+                attempt.step_name = 'end' AND
+                attempt.field_name = 'attempt' AND
+                end_attempt_ok.value IS FALSE
+            ORDER BY ts_epoch DESC
+            LIMIT 1
+        ) as end_attempt ON true
+        """.format(table_name=RUN_TABLE_NAME, metadata_table=METADATA_TABLE_NAME),
+    ]
+
+    join_columns = [
+        """
+        (CASE
+            WHEN end_attempt IS NOT NULL
+                AND end_attempt_ok.ts_epoch < end_attempt.ts_epoch
+            THEN 'running'
+            WHEN end_attempt_ok IS NOT NULL AND end_attempt_ok.value IS TRUE
+            THEN 'completed'
+            WHEN end_attempt_ok IS NOT NULL AND end_attempt_ok.value IS FALSE
+            THEN 'failed'
+            WHEN {table_name}.last_heartbeat_ts IS NOT NULL
+                AND @(extract(epoch from now())-{table_name}.last_heartbeat_ts)<={cutoff}
+            THEN 'running'
+            ELSE 'failed'
+        END) AS status
+        """.format(table_name=RUN_TABLE_NAME, cutoff=RUN_INACTIVE_CUTOFF_TIME),
+    ]
+
+    @property
+    def select_columns(self):
+        # qualify with the table name so the run columns stay unambiguous once the
+        # status joins are in play (the joined relations also expose ts_epoch).
+        return ["{table_name}.{col} AS {col}".format(table_name=self.table_name, col=k)
+                for k in self.keys]
 
     async def add_run(self, run: RunRow, fill_heartbeat: bool = False):
         dict = {
@@ -603,9 +673,23 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
         return await self.get_records(filter_dict=filter_dict,
                                       fetch_single=True, expanded=expanded, cur=cur)
 
-    async def get_all_runs(self, flow_id: str):
-        filter_dict = {"flow_id": flow_id}
-        return await self.get_records(filter_dict=filter_dict)
+    async def get_all_runs(self, flow_id: str, statuses: List[str] = None,
+                           limit: int = 0, offset: int = 0, order: List[str] = None):
+        if not statuses:
+            # plain, join-free path — unchanged behaviour for the common case
+            return await self.get_records(filter_dict={"flow_id": flow_id},
+                                          ordering=order, limit=limit)
+
+        conditions = ["flow_id = %s",
+                      "status IN ({})".format(", ".join(["%s"] * len(statuses)))]
+        values = [flow_id, *statuses]
+        # status lives in the WHERE, so the limit/offset are applied to the matching
+        # rows — the filter composes with pagination rather than competing with it.
+        response, _ = await self.find_records(
+            conditions=conditions, values=values,
+            limit=limit, offset=offset, order=order, enable_joins=True
+        )
+        return response
 
     async def update_heartbeat(self, flow_id: str, run_id: str):
         run_key, run_value = translate_run_key(run_id)
