@@ -92,6 +92,11 @@ class RunApi(object):
           description: "filter runs by status (running/completed/failed). repeat for OR."
           required: false
           type: "string"
+        - name: "user"
+          in: "query"
+          description: "filter runs by verified owner (system tag user:<name>). repeat for OR."
+          required: false
+          type: "string"
         - name: "ts_from"
           in: "query"
           description: "only runs started at/after this epoch-millisecond timestamp (inclusive)."
@@ -119,6 +124,8 @@ class RunApi(object):
             return DBResponse(response_code=400,
                               body="unsupported status filter: %s" % ", ".join(unsupported))
 
+        users = request.query.getall("user", [])
+
         ts_from, err = _parse_epoch_param(request, "ts_from")
         if err:
             return DBResponse(response_code=400, body=err)
@@ -127,7 +134,8 @@ class RunApi(object):
             return DBResponse(response_code=400, body=err)
 
         return await self._async_table.get_all_runs(
-            flow_name, statuses=statuses or None, ts_from=ts_from, ts_to=ts_to)
+            flow_name, statuses=statuses or None, users=users or None,
+            ts_from=ts_from, ts_to=ts_to)
 
     @format_response
     @handle_exceptions

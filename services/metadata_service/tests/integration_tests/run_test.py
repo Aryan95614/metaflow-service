@@ -343,6 +343,59 @@ async def test_runs_get_status_and_time_range_compose(cli, db):
     assert await _run_numbers(cli, flow_id, "?status=running&ts_to=2000") == set()
 
 
+async def test_runs_get_user_filter(cli, db):
+    # 'user' is the verified owner: the run must carry a 'user:<name>' system tag.
+    # A run with a user_name but no such tag (e.g. Step Functions) must not match.
+    _flow = (await add_flow(db, "UserFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    flow_id = _flow["flow_id"]
+
+    _alice = (await add_run(db, flow_id=flow_id, user_name="alice",
+                            system_tags=["user:alice"])).body
+    _bob = (await add_run(db, flow_id=flow_id, user_name="bob",
+                          system_tags=["user:bob"])).body
+    # user_name is set but there is no 'user:' system tag -> unverified -> no match
+    _ghost = (await add_run(db, flow_id=flow_id, user_name="carol",
+                            system_tags=["runtime:sfn"])).body
+
+    assert await _run_numbers(cli, flow_id, "?user=alice") == {_alice["run_number"]}
+    # repeated param is an OR over users
+    assert await _run_numbers(cli, flow_id, "?user=alice&user=bob") == \
+        {_alice["run_number"], _bob["run_number"]}
+    # the unverified run is excluded even though its user_name is 'carol'
+    assert await _run_numbers(cli, flow_id, "?user=carol") == set()
+    # no filter still returns everything, including the unverified run
+    assert await _run_numbers(cli, flow_id) == \
+        {_alice["run_number"], _bob["run_number"], _ghost["run_number"]}
+
+
+async def test_runs_get_status_user_and_time_compose(cli, db):
+    # status, user and time-range compose into compound filtering
+    # ("alice's failed runs since T") with no special-casing.
+    _flow = (await add_flow(db, "TriadFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    flow_id = _flow["flow_id"]
+
+    async def run_at(ts, user, **kw):
+        run = (await add_run(db, flow_id=flow_id, user_name=user,
+                             system_tags=["user:%s" % user], **kw)).body
+        await db.run_table_postgres.update_row(
+            filter_dict={"flow_id": flow_id, "run_number": run["run_number"]},
+            update_dict={"ts_epoch": ts})
+        return run["run_number"]
+
+    now = int(time.time())
+    alice_old_failed = await run_at(1000, "alice")                         # wrong window
+    alice_new_failed = await run_at(3000, "alice")                         # the target
+    await run_at(3000, "alice", last_heartbeat_ts=now)                     # wrong status (running)
+    await run_at(3000, "bob")                                             # wrong user
+
+    # each predicate removes one decoy; only alice_new_failed satisfies all three
+    assert await _run_numbers(cli, flow_id, "?status=failed&user=alice&ts_from=2000") == \
+        {alice_new_failed}
+    # drop the time bound -> both of alice's failed runs, but still not bob's/running
+    assert await _run_numbers(cli, flow_id, "?status=failed&user=alice") == \
+        {alice_old_failed, alice_new_failed}
+
+
 async def test_run_get(cli, db):
     # create flow for test
     _flow = (await add_flow(db, "TestFlow", "test_user-1", ["a_tag", "b_tag"], ["runtime:test"])).body
