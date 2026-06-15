@@ -12,6 +12,17 @@ from services.data.postgres_async_db import AsyncPostgresDB
 SUPPORTED_RUN_STATUSES = {"running", "completed", "failed"}
 
 
+def _parse_epoch_param(request, name):
+    """Optional integer epoch-ms query param -> (value, error); error set if non-int."""
+    raw = request.query.get(name)
+    if raw is None:
+        return None, None
+    try:
+        return int(raw), None
+    except (TypeError, ValueError):
+        return None, "invalid %s: expected integer epoch milliseconds, got '%s'" % (name, raw)
+
+
 class RunApi(object):
     _run_table = None
     lock = asyncio.Lock()
@@ -81,11 +92,23 @@ class RunApi(object):
           description: "filter runs by status (running/completed/failed). repeat for OR."
           required: false
           type: "string"
+        - name: "ts_from"
+          in: "query"
+          description: "only runs started at/after this epoch-millisecond timestamp (inclusive)."
+          required: false
+          type: "integer"
+        - name: "ts_to"
+          in: "query"
+          description: "only runs started at/before this epoch-millisecond timestamp (inclusive)."
+          required: false
+          type: "integer"
         produces:
         - text/plain
         responses:
             "200":
                 description: Returned all runs of specified flow
+            "400":
+                description: unsupported status filter or non-integer time bound
             "405":
                 description: invalid HTTP Method
         """
@@ -95,7 +118,16 @@ class RunApi(object):
         if unsupported:
             return DBResponse(response_code=400,
                               body="unsupported status filter: %s" % ", ".join(unsupported))
-        return await self._async_table.get_all_runs(flow_name, statuses=statuses or None)
+
+        ts_from, err = _parse_epoch_param(request, "ts_from")
+        if err:
+            return DBResponse(response_code=400, body=err)
+        ts_to, err = _parse_epoch_param(request, "ts_to")
+        if err:
+            return DBResponse(response_code=400, body=err)
+
+        return await self._async_table.get_all_runs(
+            flow_name, statuses=statuses or None, ts_from=ts_from, ts_to=ts_to)
 
     @format_response
     @handle_exceptions

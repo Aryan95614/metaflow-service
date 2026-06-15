@@ -263,6 +263,86 @@ async def test_runs_get_status_filter_composes_with_pagination(cli, db):
     assert [r["run_number"] for r in page] == newest_two
 
 
+async def test_runs_get_time_range_filter(cli, db):
+    # ts_epoch is stamped by the DB, so read it back and use the observed min/max as
+    # bounds. Bounds are inclusive; a window outside the data returns nothing.
+    _flow = (await add_flow(db, "TimeFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    flow_id = _flow["flow_id"]
+
+    runs = [(await add_run(db, flow_id=flow_id)).body for _ in range(3)]
+    epochs = [int(r["ts_epoch"]) for r in runs]
+    lo, hi = min(epochs), max(epochs)
+    everyone = {r["run_number"] for r in runs}
+
+    # inclusive bounds: an endpoint exactly on the data still matches it
+    assert await _run_numbers(cli, flow_id, "?ts_from=%d" % lo) == everyone
+    assert await _run_numbers(cli, flow_id, "?ts_to=%d" % hi) == everyone
+    assert await _run_numbers(cli, flow_id, "?ts_from=%d&ts_to=%d" % (lo, hi)) == everyone
+    # windows that sit entirely outside the data are empty, not an error
+    assert await _run_numbers(cli, flow_id, "?ts_from=%d" % (hi + 1)) == set()
+    assert await _run_numbers(cli, flow_id, "?ts_to=%d" % (lo - 1)) == set()
+    # no bound still returns everything
+    assert await _run_numbers(cli, flow_id) == everyone
+
+
+async def test_runs_get_time_range_partitions_runs(cli, db):
+    # stamp deterministic timestamps so the window genuinely splits the set.
+    _flow = (await add_flow(db, "StampFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    flow_id = _flow["flow_id"]
+
+    async def run_at(ts):
+        run = (await add_run(db, flow_id=flow_id)).body
+        await db.run_table_postgres.update_row(
+            filter_dict={"flow_id": flow_id, "run_number": run["run_number"]},
+            update_dict={"ts_epoch": ts})
+        return run["run_number"]
+
+    old = await run_at(1000)
+    mid = await run_at(2000)
+    new = await run_at(3000)
+
+    assert await _run_numbers(cli, flow_id, "?ts_from=2000") == {mid, new}
+    assert await _run_numbers(cli, flow_id, "?ts_to=2000") == {old, mid}
+    assert await _run_numbers(cli, flow_id, "?ts_from=1500&ts_to=2500") == {mid}
+
+
+async def test_runs_get_time_range_rejects_non_integer(cli, db):
+    _flow = (await add_flow(db, "BadTimeFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    await add_run(db, flow_id=_flow["flow_id"])
+
+    # a programmatic consumer passing a malformed bound should fail loud, not be
+    # silently ignored (same stance as an unknown status).
+    assert (await cli.get("/flows/{flow_id}/runs?ts_from=notanumber".format(**_flow))).status == 400
+    assert (await cli.get("/flows/{flow_id}/runs?ts_to=2026-01-01".format(**_flow))).status == 400
+
+
+async def test_runs_get_status_and_time_range_compose(cli, db):
+    # status and time-range are ANDed, so a run must satisfy both to be returned.
+    _flow = (await add_flow(db, "ComposeFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    flow_id = _flow["flow_id"]
+
+    async def run_at(ts, **kw):
+        run = (await add_run(db, flow_id=flow_id, **kw)).body
+        await db.run_table_postgres.update_row(
+            filter_dict={"flow_id": flow_id, "run_number": run["run_number"]},
+            update_dict={"ts_epoch": ts})
+        return run["run_number"]
+
+    now = int(time.time())
+    old_failed = await run_at(1000)                          # failed, before window
+    new_failed = await run_at(3000)                          # failed, inside window
+    new_running = await run_at(3000, last_heartbeat_ts=now)  # running, inside window
+
+    # status alone catches both failed runs regardless of time
+    assert await _run_numbers(cli, flow_id, "?status=failed") == {old_failed, new_failed}
+    # adding a time bound narrows it to the failed run inside the window
+    assert await _run_numbers(cli, flow_id, "?status=failed&ts_from=2000") == {new_failed}
+    # the running run is inside the window but excluded by the status predicate
+    assert await _run_numbers(cli, flow_id, "?status=running&ts_from=2000") == {new_running}
+    # a status that matches but a window that does not yields nothing
+    assert await _run_numbers(cli, flow_id, "?status=running&ts_to=2000") == set()
+
+
 async def test_run_get(cli, db):
     # create flow for test
     _flow = (await add_flow(db, "TestFlow", "test_user-1", ["a_tag", "b_tag"], ["runtime:test"])).body

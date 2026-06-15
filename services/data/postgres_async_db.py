@@ -674,20 +674,35 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
                                       fetch_single=True, expanded=expanded, cur=cur)
 
     async def get_all_runs(self, flow_id: str, statuses: List[str] = None,
+                           ts_from: int = None, ts_to: int = None,
                            limit: int = 0, offset: int = 0, order: List[str] = None):
-        if not statuses:
-            # plain, join-free path — unchanged behaviour for the common case
+        # Each supplied filter adds one ANDed predicate, applied before LIMIT/OFFSET,
+        # so filters compose and stay correct under pagination.
+        conditions = ["flow_id = %s"]
+        values = [flow_id]
+
+        if statuses:
+            conditions.append(
+                "status IN ({})".format(", ".join(["%s"] * len(statuses))))
+            values.extend(statuses)
+
+        # ts_epoch is the run start time in epoch milliseconds. Bounds are inclusive.
+        if ts_from is not None:
+            conditions.append("ts_epoch >= %s")
+            values.append(ts_from)
+        if ts_to is not None:
+            conditions.append("ts_epoch <= %s")
+            values.append(ts_to)
+
+        if len(conditions) == 1:
+            # unfiltered: keep the original join-free query, byte-identical to before.
             return await self.get_records(filter_dict={"flow_id": flow_id},
                                           ordering=order, limit=limit)
 
-        conditions = ["flow_id = %s",
-                      "status IN ({})".format(", ".join(["%s"] * len(statuses)))]
-        values = [flow_id, *statuses]
-        # status lives in the WHERE, so the limit/offset are applied to the matching
-        # rows — the filter composes with pagination rather than competing with it.
+        # Only status is a derived column, so it alone needs the lateral joins.
         response, _ = await self.find_records(
             conditions=conditions, values=values,
-            limit=limit, offset=offset, order=order, enable_joins=True
+            limit=limit, offset=offset, order=order, enable_joins=bool(statuses)
         )
         return response
 
