@@ -221,6 +221,30 @@ async def test_runs_get_status_filter_classification(cli, db):
         {_failed_attempt["run_number"], _stale["run_number"]}
 
 
+async def test_runs_get_status_filter_retrying(cli, db):
+    # the first CASE branch: a run whose 'end' step failed (attempt_ok=false) but has a
+    # *newer* 'attempt' record is being retried, so it reads as running, not failed.
+    # The branch turns on a strict ts_epoch comparison between the two metadata rows, so
+    # stamp their timestamps explicitly rather than trusting insert order.
+    _flow = (await add_flow(db, "RetryFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    flow_id = _flow["flow_id"]
+    _retrying = (await add_run(db, flow_id=flow_id)).body
+
+    async def stamp_end_metadata(field_name, value, ts):
+        md = (await add_metadata(db, flow_id=flow_id, run_number=_retrying["run_number"],
+                                 step_name="end", task_id=1,
+                                 metadata={"field_name": field_name, "value": value})).body
+        await db.metadata_table_postgres.update_row(
+            filter_dict={"id": md["id"]}, update_dict={"ts_epoch": ts})
+
+    # end step failed at T=1000, then a new attempt started at T=2000 (the retry)
+    await stamp_end_metadata("attempt_ok", "false", 1000)
+    await stamp_end_metadata("attempt", "1", 2000)
+
+    assert await _run_numbers(cli, flow_id, "?status=running") == {_retrying["run_number"]}
+    assert await _run_numbers(cli, flow_id, "?status=failed") == set()
+
+
 async def test_runs_get_status_filter_composes_with_pagination(cli, db):
     # a filter has to ride on top of pagination: a limited page of "failed" runs must
     # be the matching rows taken *after* filtering, not a limited slice that then gets
