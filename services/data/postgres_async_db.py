@@ -674,9 +674,9 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
                                       fetch_single=True, expanded=expanded, cur=cur)
 
     async def get_all_runs(self, flow_id: str, statuses: List[str] = None,
-                           users: List[str] = None, ts_from: int = None,
-                           ts_to: int = None, limit: int = 0, offset: int = 0,
-                           order: List[str] = None):
+                           users: List[str] = None, tags: List[str] = None,
+                           ts_from: int = None, ts_to: int = None,
+                           limit: int = 0, offset: int = 0, order: List[str] = None):
         # Each supplied filter adds one ANDed predicate, applied before LIMIT/OFFSET,
         # so filters compose and stay correct under pagination.
         conditions = ["flow_id = %s"]
@@ -694,6 +694,13 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
                 "(CASE WHEN system_tags ? ('user:' || user_name) THEN user_name "
                 "ELSE NULL END) IN ({})".format(", ".join(["%s"] * len(users))))
             values.extend(users)
+
+        # 'tag' matches the run's tags and system_tags combined; repeating it is an OR.
+        # Uses the GIN index on (tags || system_tags) via the jsonb ?| operator.
+        if tags:
+            conditions.append(
+                "(tags || system_tags) ?| array[{}]".format(", ".join(["%s"] * len(tags))))
+            values.extend(tags)
 
         # ts_epoch is the run start time in epoch milliseconds. Bounds are inclusive.
         if ts_from is not None:

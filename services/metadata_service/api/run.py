@@ -97,6 +97,11 @@ class RunApi(object):
           description: "filter runs by verified owner (system tag user:<name>). repeat for OR."
           required: false
           type: "string"
+        - name: "tag"
+          in: "query"
+          description: "filter runs by tag (matches tags and system_tags). repeat for OR."
+          required: false
+          type: "string"
         - name: "ts_from"
           in: "query"
           description: "only runs started at/after this epoch-millisecond timestamp (inclusive)."
@@ -125,6 +130,7 @@ class RunApi(object):
                               body="unsupported status filter: %s" % ", ".join(unsupported))
 
         users = request.query.getall("user", [])
+        tags = request.query.getall("tag", [])
 
         ts_from, err = _parse_epoch_param(request, "ts_from")
         if err:
@@ -135,7 +141,7 @@ class RunApi(object):
 
         return await self._async_table.get_all_runs(
             flow_name, statuses=statuses or None, users=users or None,
-            ts_from=ts_from, ts_to=ts_to)
+            tags=tags or None, ts_from=ts_from, ts_to=ts_to)
 
     @format_response
     @handle_exceptions

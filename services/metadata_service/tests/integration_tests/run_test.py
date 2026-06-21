@@ -396,6 +396,48 @@ async def test_runs_get_status_user_and_time_compose(cli, db):
         {alice_old_failed, alice_new_failed}
 
 
+async def test_runs_get_tag_filter(cli, db):
+    # 'tag' matches against tags and system_tags combined; repeating it is an OR.
+    _flow = (await add_flow(db, "TagFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    flow_id = _flow["flow_id"]
+
+    _prod = (await add_run(db, flow_id=flow_id, tags=["env:prod"])).body
+    _dev = (await add_run(db, flow_id=flow_id, tags=["env:dev"])).body
+    # tag lives in system_tags, not tags -> still matches the combined set
+    _sys = (await add_run(db, flow_id=flow_id, tags=["x"], system_tags=["team:ml"])).body
+
+    assert await _run_numbers(cli, flow_id, "?tag=env:prod") == {_prod["run_number"]}
+    # repeated param is an OR over tags
+    assert await _run_numbers(cli, flow_id, "?tag=env:prod&tag=env:dev") == \
+        {_prod["run_number"], _dev["run_number"]}
+    # a system tag matches too
+    assert await _run_numbers(cli, flow_id, "?tag=team:ml") == {_sys["run_number"]}
+    # unknown tag matches nothing
+    assert await _run_numbers(cli, flow_id, "?tag=nope") == set()
+    # no filter still returns everything
+    assert await _run_numbers(cli, flow_id) == \
+        {_prod["run_number"], _dev["run_number"], _sys["run_number"]}
+
+
+async def test_runs_get_tag_and_status_compose(cli, db):
+    # tag is just one more ANDed predicate, so it composes with status.
+    _flow = (await add_flow(db, "TagStatusFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    flow_id = _flow["flow_id"]
+    now = int(time.time())
+
+    _failed_prod = (await add_run(db, flow_id=flow_id, tags=["env:prod"])).body
+    _running_prod = (await add_run(db, flow_id=flow_id, tags=["env:prod"],
+                                   last_heartbeat_ts=now)).body
+    _failed_dev = (await add_run(db, flow_id=flow_id, tags=["env:dev"])).body
+
+    # failed AND tagged prod -> only the failed prod run
+    assert await _run_numbers(cli, flow_id, "?status=failed&tag=env:prod") == \
+        {_failed_prod["run_number"]}
+    # tag alone catches both prod runs regardless of status
+    assert await _run_numbers(cli, flow_id, "?tag=env:prod") == \
+        {_failed_prod["run_number"], _running_prod["run_number"]}
+
+
 async def test_run_get(cli, db):
     # create flow for test
     _flow = (await add_flow(db, "TestFlow", "test_user-1", ["a_tag", "b_tag"], ["runtime:test"])).body
