@@ -675,10 +675,13 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
 
     async def get_all_runs(self, flow_id: str, statuses: List[str] = None,
                            users: List[str] = None, tags: List[str] = None,
-                           ts_from: int = None, ts_to: int = None,
-                           limit: int = 0, offset: int = 0, order: List[str] = None):
+                           exclude_statuses: List[str] = None, exclude_users: List[str] = None,
+                           exclude_tags: List[str] = None, ts_from: int = None,
+                           ts_to: int = None, limit: int = 0, offset: int = 0,
+                           order: List[str] = None):
         # Each supplied filter adds one ANDed predicate, applied before LIMIT/OFFSET,
-        # so filters compose and stay correct under pagination.
+        # so filters compose and stay correct under pagination. Every filter has an
+        # exclude_ counterpart that negates the same predicate (NOT semantics).
         conditions = ["flow_id = %s"]
         values = [flow_id]
 
@@ -686,14 +689,24 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
             conditions.append(
                 "status IN ({})".format(", ".join(["%s"] * len(statuses))))
             values.extend(statuses)
+        if exclude_statuses:
+            conditions.append(
+                "status NOT IN ({})".format(", ".join(["%s"] * len(exclude_statuses))))
+            values.extend(exclude_statuses)
 
         # 'user' is the verified owner: matches only when system_tags carry
         # 'user:<name>'. Reuses the ui_backend definition so the two services agree.
+        user_expr = ("(CASE WHEN system_tags ? ('user:' || user_name) "
+                     "THEN user_name ELSE NULL END)")
         if users:
             conditions.append(
-                "(CASE WHEN system_tags ? ('user:' || user_name) THEN user_name "
-                "ELSE NULL END) IN ({})".format(", ".join(["%s"] * len(users))))
+                "{} IN ({})".format(user_expr, ", ".join(["%s"] * len(users))))
             values.extend(users)
+        if exclude_users:
+            # keep runs with no verified user (NULL); only drop the named owners.
+            conditions.append("({0} IS NULL OR {0} NOT IN ({1}))".format(
+                user_expr, ", ".join(["%s"] * len(exclude_users))))
+            values.extend(exclude_users)
 
         # 'tag' matches the run's tags and system_tags combined; repeating it is an OR.
         # Uses the GIN index on (tags || system_tags) via the jsonb ?| operator.
@@ -701,6 +714,10 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
             conditions.append(
                 "(tags || system_tags) ?| array[{}]".format(", ".join(["%s"] * len(tags))))
             values.extend(tags)
+        if exclude_tags:
+            conditions.append(
+                "NOT ((tags || system_tags) ?| array[{}])".format(", ".join(["%s"] * len(exclude_tags))))
+            values.extend(exclude_tags)
 
         # ts_epoch is the run start time in epoch milliseconds. Bounds are inclusive.
         if ts_from is not None:
@@ -715,10 +732,11 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
             return await self.get_records(filter_dict={"flow_id": flow_id},
                                           ordering=order, limit=limit)
 
-        # Only status is a derived column, so it alone needs the lateral joins.
+        # status is the only derived column, so any status filter needs the joins.
         response, _ = await self.find_records(
             conditions=conditions, values=values,
-            limit=limit, offset=offset, order=order, enable_joins=bool(statuses)
+            limit=limit, offset=offset, order=order,
+            enable_joins=bool(statuses or exclude_statuses)
         )
         return response
 

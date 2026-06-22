@@ -438,6 +438,33 @@ async def test_runs_get_tag_and_status_compose(cli, db):
         {_failed_prod["run_number"], _running_prod["run_number"]}
 
 
+async def test_runs_get_exclusion_filters(cli, db):
+    # NOT semantics: exclude_<x> drops matching runs and keeps the rest. A run with no
+    # verified user must survive exclude_user (it is not the excluded owner).
+    _flow = (await add_flow(db, "ExcludeFlow", "test_user-1", ["a_tag"], ["runtime:test"])).body
+    flow_id = _flow["flow_id"]
+    now = int(time.time())
+
+    _running = (await add_run(db, flow_id=flow_id, last_heartbeat_ts=now)).body
+    _failed = (await add_run(db, flow_id=flow_id)).body
+    _alice = (await add_run(db, flow_id=flow_id, user_name="alice",
+                            system_tags=["user:alice"], last_heartbeat_ts=now)).body
+    _prod = (await add_run(db, flow_id=flow_id, tags=["env:prod"], last_heartbeat_ts=now)).body
+    everyone = {r["run_number"] for r in (_running, _failed, _alice, _prod)}
+
+    # exclude_status drops the failed run
+    assert await _run_numbers(cli, flow_id, "?exclude_status=failed") == everyone - {_failed["run_number"]}
+    # exclude_user drops alice but KEEPS runs with no verified user
+    assert await _run_numbers(cli, flow_id, "?exclude_user=alice") == everyone - {_alice["run_number"]}
+    # exclude_tag drops the prod-tagged run
+    assert await _run_numbers(cli, flow_id, "?exclude_tag=env:prod") == everyone - {_prod["run_number"]}
+    # an unknown exclude_status is rejected, same as status
+    assert (await cli.get("/flows/{flow_id}/runs?exclude_status=bogus".format(**_flow))).status == 400
+    # exclusion composes with inclusion: running runs that are not alice's
+    assert await _run_numbers(cli, flow_id, "?status=running&exclude_user=alice") == \
+        {_running["run_number"], _prod["run_number"]}
+
+
 async def test_run_get(cli, db):
     # create flow for test
     _flow = (await add_flow(db, "TestFlow", "test_user-1", ["a_tag", "b_tag"], ["runtime:test"])).body

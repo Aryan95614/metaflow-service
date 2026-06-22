@@ -112,6 +112,21 @@ class RunApi(object):
           description: "only runs started at/before this epoch-millisecond timestamp (inclusive)."
           required: false
           type: "integer"
+        - name: "exclude_status"
+          in: "query"
+          description: "exclude runs with this status. repeat for multiple. NOT of ?status."
+          required: false
+          type: "string"
+        - name: "exclude_user"
+          in: "query"
+          description: "exclude runs owned by this user. repeat for multiple. NOT of ?user."
+          required: false
+          type: "string"
+        - name: "exclude_tag"
+          in: "query"
+          description: "exclude runs carrying this tag. repeat for multiple. NOT of ?tag."
+          required: false
+          type: "string"
         produces:
         - text/plain
         responses:
@@ -124,13 +139,17 @@ class RunApi(object):
         """
         flow_name = request.match_info.get("flow_id")
         statuses = request.query.getall("status", [])
-        unsupported = [s for s in statuses if s not in SUPPORTED_RUN_STATUSES]
+        exclude_statuses = request.query.getall("exclude_status", [])
+        unsupported = [s for s in statuses + exclude_statuses
+                       if s not in SUPPORTED_RUN_STATUSES]
         if unsupported:
             return DBResponse(response_code=400,
                               body="unsupported status filter: %s" % ", ".join(unsupported))
 
         users = request.query.getall("user", [])
         tags = request.query.getall("tag", [])
+        exclude_users = request.query.getall("exclude_user", [])
+        exclude_tags = request.query.getall("exclude_tag", [])
 
         ts_from, err = _parse_epoch_param(request, "ts_from")
         if err:
@@ -141,7 +160,9 @@ class RunApi(object):
 
         return await self._async_table.get_all_runs(
             flow_name, statuses=statuses or None, users=users or None,
-            tags=tags or None, ts_from=ts_from, ts_to=ts_to)
+            tags=tags or None, exclude_statuses=exclude_statuses or None,
+            exclude_users=exclude_users or None, exclude_tags=exclude_tags or None,
+            ts_from=ts_from, ts_to=ts_to)
 
     @format_response
     @handle_exceptions
