@@ -8,6 +8,7 @@ from .base import (
 )
 from ..models import RunRow
 from services.data.db_utils import DBResponse, DBPagination, translate_run_key
+from services.data.run_status import run_status_joins, run_status_case
 
 # use schema constants from the .data module to keep things consistent
 from services.data.postgres_async_db import (
@@ -33,43 +34,9 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
     trigger_keys = MetadataRunTable.trigger_keys
     trigger_operations = ["INSERT"]
 
-    # NOTE: OSS Schema has metadata value column as TEXT, but for the time being we also need to support
-    # value columns of type jsonb, which is why there is additional logic when dealing with 'value'
-    joins = [
-        """
-        LEFT JOIN LATERAL (
-            SELECT
-                ts_epoch,
-                (CASE
-                    WHEN pg_typeof(value)='jsonb'::regtype
-                    THEN value::jsonb->>0
-                    ELSE value::text
-                END)::boolean as value
-            FROM {metadata_table} as attempt_ok
-            WHERE
-                {table_name}.flow_id = attempt_ok.flow_id AND
-                {table_name}.run_number = attempt_ok.run_number AND
-                attempt_ok.step_name = 'end' AND
-                attempt_ok.field_name = 'attempt_ok'
-            ORDER BY ts_epoch DESC
-            LIMIT 1
-        ) as end_attempt_ok ON true
-        """.format(table_name=table_name, metadata_table=metadata_table),
-        """
-        LEFT JOIN LATERAL (
-            SELECT ts_epoch
-            FROM {metadata_table} as attempt
-            WHERE
-                {table_name}.flow_id = attempt.flow_id AND
-                {table_name}.run_number = attempt.run_number AND
-                attempt.step_name = 'end' AND
-                attempt.field_name = 'attempt' AND
-                end_attempt_ok.value IS FALSE
-            ORDER BY ts_epoch DESC
-            LIMIT 1
-        ) as end_attempt ON true
-        """.format(table_name=table_name, metadata_table=metadata_table),
-    ]
+    # The 'end' step attempt joins the run status derives from live in the shared
+    # services/data/run_status.py so this table and the metadata service stay in sync.
+    joins = run_status_joins(table_name, metadata_table)
 
     @property
     def select_columns(self):
@@ -109,24 +76,7 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
             table_name=table_name,
             heartbeat_cutoff=RUN_INACTIVE_CUTOFF_TIME,
         ),
-        """
-        (CASE
-            WHEN end_attempt IS NOT NULL
-                AND end_attempt_ok.ts_epoch < end_attempt.ts_epoch
-            THEN 'running'
-            WHEN end_attempt_ok IS NOT NULL AND end_attempt_ok.value IS TRUE
-            THEN 'completed'
-            WHEN end_attempt_ok IS NOT NULL AND end_attempt_ok.value IS FALSE
-            THEN 'failed'
-            WHEN {table_name}.last_heartbeat_ts IS NOT NULL
-                AND @(extract(epoch from now())-{table_name}.last_heartbeat_ts)<={heartbeat_cutoff}
-            THEN 'running'
-            ELSE 'failed'
-        END) AS status
-        """.format(
-            table_name=table_name,
-            heartbeat_cutoff=RUN_INACTIVE_CUTOFF_TIME,
-        ),
+        run_status_case(table_name),
         """
         (CASE
             WHEN end_attempt IS NOT NULL
