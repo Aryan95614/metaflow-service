@@ -10,13 +10,16 @@ from .utils import (
 import sys
 import asyncio
 
+from pyee import AsyncIOEventEmitter
+
 TAGS_FILL_INTERVAL_SECONDS = 60 * 5
 
 
 class AutoCompleteApi(object):
 
-    def __init__(self, app, db):
+    def __init__(self, app, db, event_emitter=None):
         self.db = db
+        self.event_emitter = event_emitter or AsyncIOEventEmitter()
         # Cached resources
         # Cache tags so we don't have to request DB everytime
         self.tags = []
@@ -40,6 +43,8 @@ class AutoCompleteApi(object):
         loop = asyncio.get_event_loop()
         loop.create_task(self.periodic_tags_fetch_and_cache())
 
+        self.event_emitter.on("refresh-run-tags", self.refresh_run_tags_event_handler)
+
     async def periodic_tags_fetch_and_cache(self):
         """
         Async task that fill tags cache every 5minutes. Database query might take a while
@@ -52,12 +57,36 @@ class AutoCompleteApi(object):
 
     async def update_cached_tags(self):
         # Get all tags that are mentioned in runs table
+        before = set(self.tags)
         res, _ = await self.db.run_table_postgres.get_tags()
         if res.response_code == 200:
-            self.tags = sorted(res.body)
+            added_during_scan = set(self.tags) - before
+            self.tags = sorted(set(res.body) | added_during_scan)
         size = sys.getsizeof(self.tags) // 1024 // 1024
         count = len(self.tags)
         self.logger.info("{} cached tags in memory consuming {} Mb".format(count, size))
+
+    async def refresh_run_tags_event_handler(self, flow_id: str, run_number: int):
+        """
+        Handler for event-emitter. Fetches tags for a single run and merges them
+        into the cache, so new tags show up without waiting for the periodic refresh.
+        """
+        try:
+            res = await self.db.run_table_postgres.get_run(flow_id, str(run_number))
+            if res.response_code == 200:
+                new_tags = (res.body.get("tags") or []) + (
+                    res.body.get("system_tags") or []
+                )
+                merged = set(self.tags) | set(new_tags)
+                if len(merged) != len(self.tags):
+                    self.tags = sorted(merged)
+                    self.logger.info(
+                        "Tag cache updated from run {}/{}".format(flow_id, run_number)
+                    )
+        except Exception:
+            self.logger.exception(
+                "Failed to refresh tags for run {}/{}".format(flow_id, run_number)
+            )
 
     @handle_exceptions
     async def get_tags(self, request):

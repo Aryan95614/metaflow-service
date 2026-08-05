@@ -189,6 +189,14 @@ class ListenNotify(object):
                         "preload-dag", data["flow_id"], data["run_number"]
                     )
 
+                # Notify run event to refresh tag cache
+                if (
+                    operation == "INSERT"
+                    and table.table_name == self.db.run_table_postgres.table_name
+                ):
+                    self.event_emitter.emit(
+                        "refresh-run-tags", data["flow_id"], data["run_number"]
+                    )
         except Exception:
             self.logger.exception("Exception occurred")
 

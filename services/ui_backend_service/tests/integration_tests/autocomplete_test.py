@@ -144,6 +144,43 @@ async def test_tags_autocomplete(cli, db):
     )
 
 
+async def test_tags_autocomplete_event_refresh(cli, db):
+    await _test_list_resources(cli, db, "/tags/autocomplete", 200, [])
+    await add_flow(db, flow_id="HelloFlow")
+    _run = (
+        await add_run(
+            db, flow_id="HelloFlow", run_id="HelloRun", tags=["tag:something"]
+        )
+    ).body
+
+    # simulate the DB event instead of waiting for the periodic refresh
+    await cli.server.app.AutoCompleteApi.refresh_run_tags_event_handler(
+        _run.get("flow_id"), _run.get("run_number")
+    )
+    # Note that runtime:dev tags gets assigned automatically
+    await _test_list_resources(
+        cli, db, "/tags/autocomplete", 200, ["run_system_tag", "tag:something"]
+    )
+
+    # Partial match
+    await _test_list_resources(
+        cli, db, "/tags/autocomplete?tag:co=thing", 200, ["tag:something"]
+    )
+
+    # Custom match 'tag:.*thing'
+    await _test_list_resources(
+        cli, db, "/tags/autocomplete?tag:re=tag:.*thing", 200, ["tag:something"]
+    )
+
+    # non-existent run should not raise or corrupt the cache
+    await cli.server.app.AutoCompleteApi.refresh_run_tags_event_handler(
+        "NoSuchFlow", 99999
+    )
+    await _test_list_resources(
+        cli, db, "/tags/autocomplete", 200, ["run_system_tag", "tag:something"]
+    )
+
+
 async def test_artifacts_autocomplete(cli, db):
     _flow = (await add_flow(db, flow_id="HelloFlow")).body
     _run = (await add_run(db, flow_id=_flow.get("flow_id"))).body
