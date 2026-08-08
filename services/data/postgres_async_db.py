@@ -252,6 +252,16 @@ class AsyncPostgresTable(object):
                     conditions=self.trigger_conditions,
                 )
 
+    def _resolve_select_columns(self, with_run_tags: bool = False) -> List[str]:
+        """Columns to select for a single read.
+
+        A method taking the flag rather than a property reading instance state:
+        table objects are shared across concurrent requests, so anything stashed
+        on self can be clobbered by another request across an await. Subclasses
+        that support the run-tags join override this.
+        """
+        return self.select_columns
+
     async def get_records(
         self,
         filter_dict={},
@@ -260,6 +270,7 @@ class AsyncPostgresTable(object):
         limit: int = 0,
         expanded=False,
         cur: aiopg.Cursor = None,
+        with_run_tags: bool = False,
     ) -> DBResponse:
         conditions = []
         values = []
@@ -275,6 +286,7 @@ class AsyncPostgresTable(object):
             limit=limit,
             expanded=expanded,
             cur=cur,
+            with_run_tags=with_run_tags,
         )
         return response
 
@@ -331,6 +343,7 @@ class AsyncPostgresTable(object):
         expanded=False,
         enable_joins=False,
         cur: aiopg.Cursor = None,
+        with_run_tags: bool = False,
     ) -> Tuple[DBResponse, DBPagination]:
         sql_template = """
         SELECT * FROM (
@@ -345,14 +358,17 @@ class AsyncPostgresTable(object):
         {offset}
         """
 
+        # For tables carrying the run-tags join, opting in implies enabling joins.
+        use_joins = enable_joins or with_run_tags
+
         select_sql = sql_template.format(
             keys=",".join(
-                self.select_columns
-                + (self.join_columns if enable_joins and self.join_columns else [])
+                self._resolve_select_columns(with_run_tags)
+                + (self.join_columns if use_joins and self.join_columns else [])
             ),
             table_name=self.table_name,
             joins=(
-                " ".join(self.joins) if enable_joins and self.joins is not None else ""
+                " ".join(self.joins) if use_joins and self.joins is not None else ""
             ),
             where="WHERE {}".format(" AND ".join(conditions)) if conditions else "",
             order_by="ORDER BY {}".format(", ".join(order)) if order else "",
@@ -941,25 +957,18 @@ class _RunTagsJoinMixin:
     Handler-facing reads pass with_run_tags=True, which embeds a LEFT JOIN to
     runs_v3 in the query so the run's tags come back in the same SELECT --
     replacing the post-query get_run + deepcopy in apply_run_tags_to_db_response.
+
+    with_run_tags is threaded through as a call argument the whole way down
+    (get_records -> find_records -> _resolve_select_columns) and is never stored
+    on the instance. One table object serves every concurrent request, so a flag
+    held on self would be visible to -- and clobbered by -- other requests that
+    interleave at any await inside the read.
     """
 
-    @property
-    def select_columns(self):
-        if getattr(self, "_with_run_tags", False):
+    def _resolve_select_columns(self, with_run_tags: bool = False) -> List[str]:
+        if with_run_tags:
             return _run_tag_qualified_columns(self.table_name, self.keys)
         return self.keys
-
-    async def find_records(self, *args, **kwargs):
-        if getattr(self, "_with_run_tags", False):
-            kwargs["enable_joins"] = True
-        return await super().find_records(*args, **kwargs)
-
-    async def get_records(self, *args, with_run_tags=False, **kwargs):
-        self._with_run_tags = with_run_tags
-        try:
-            return await super().get_records(*args, **kwargs)
-        finally:
-            self._with_run_tags = False
 
 
 class AsyncStepTablePostgres(_RunTagsJoinMixin, AsyncPostgresTable):
@@ -1089,16 +1098,13 @@ class AsyncTaskTablePostgres(_RunTagsJoinMixin, AsyncPostgresTable):
         # Filtered task listing. The field:operator conditions/values come pre-built from
         # the shared grammar; there are no derived columns here, so no joins are needed
         # beyond the optional run-tags join.
-        self._with_run_tags = with_run_tags
-        try:
-            response, pagination = await self.find_records(
-                conditions=conditions,
-                values=values,
-                limit=cur_limit,
-                order=order,
-            )
-        finally:
-            self._with_run_tags = False
+        response, pagination = await self.find_records(
+            conditions=conditions,
+            values=values,
+            limit=cur_limit,
+            order=order,
+            with_run_tags=with_run_tags,
+        )
 
         if len(response.body) > limit:
             response = response._replace(body=response.body[:limit])
