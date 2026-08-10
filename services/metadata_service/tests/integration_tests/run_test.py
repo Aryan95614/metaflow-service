@@ -13,6 +13,8 @@ from .utils import (
     compare_partial,
     add_flow,
     add_run,
+    add_step,
+    add_task,
     add_metadata,
     assert_api_patch_response,
     assert_paginated_api_get_response,
@@ -279,6 +281,39 @@ async def test_runs_get_status_filter_classification(cli, db):
         _failed_attempt["run_number"],
         _stale["run_number"],
     }
+
+
+async def test_runs_get_status_filter_uses_fresh_task_heartbeat(cli, db):
+    _flow = (await add_flow(db, "TaskHeartbeatFlow")).body
+    now = int(time.time())
+    _run = (
+        await add_run(
+            db,
+            flow_id=_flow["flow_id"],
+            last_heartbeat_ts=now - RUN_INACTIVE_CUTOFF_TIME - 60,
+        )
+    ).body
+    _step = (
+        await add_step(
+            db,
+            flow_id=_run["flow_id"],
+            run_number=_run["run_number"],
+            step_name="active_task",
+        )
+    ).body
+    await add_task(
+        db,
+        flow_id=_step["flow_id"],
+        run_number=_step["run_number"],
+        step_name=_step["step_name"],
+        last_heartbeat_ts=now,
+    )
+
+    flow_id = _flow["flow_id"]
+    assert await _run_numbers(cli, flow_id, "?status:eq=running") == {
+        _run["run_number"]
+    }
+    assert await _run_numbers(cli, flow_id, "?status:eq=failed") == set()
 
 
 async def test_runs_get_status_filter_retrying(cli, db):

@@ -36,7 +36,7 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
 
     # The 'end' step attempt joins the run status derives from live in the shared
     # services/data/run_status.py so this table and the metadata service stay in sync.
-    joins = run_status_joins(table_name, metadata_table)
+    joins = run_status_joins(table_name, metadata_table, task_table)
 
     @property
     def select_columns(self):
@@ -69,6 +69,9 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
             THEN end_attempt_ok.ts_epoch
             WHEN {table_name}.last_heartbeat_ts IS NOT NULL
                 AND @(extract(epoch from now())-{table_name}.last_heartbeat_ts)<={heartbeat_cutoff}
+            THEN NULL
+            WHEN latest_task_heartbeat.last_heartbeat_ts IS NOT NULL
+                AND @(extract(epoch from now())-latest_task_heartbeat.last_heartbeat_ts)<={heartbeat_cutoff}
             THEN NULL
             ELSE {table_name}.last_heartbeat_ts*1000
         END) AS finished_at

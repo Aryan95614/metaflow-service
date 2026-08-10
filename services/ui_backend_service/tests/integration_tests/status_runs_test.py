@@ -304,8 +304,8 @@ async def test_run_status_failed_with_heartbeat_expired_and_no_failed_tasks(cli,
     assert data["last_heartbeat_ts"] == _heartbeat
     assert data["finished_at"] == _run["last_heartbeat_ts"] * 1000
 
-    # even if the run has no failed tasks, it should count as failed at this point due to not receiving heartbeats
-    # on the run level for long enough (should count as stuck, ie. 'failed')
+    # A fresh task heartbeat is definitive proof that the run is still active, even when
+    # the run-level heartbeat has been stale for much longer than the cutoff.
     _step = (
         await add_step(
             db,
@@ -330,11 +330,11 @@ async def test_run_status_failed_with_heartbeat_expired_and_no_failed_tasks(cli,
         cli, db, "/flows/{flow_id}/runs/{run_number}".format(**_run), 200
     )
 
-    assert data["status"] == "failed"
+    assert data["status"] == "running"
     assert data["ts_epoch"] == _run["ts_epoch"]
     assert data["last_heartbeat_ts"] == _heartbeat
     assert data["duration"] == _run["last_heartbeat_ts"] * 1000 - _run["ts_epoch"]
-    assert data["finished_at"] == _run["last_heartbeat_ts"] * 1000
+    assert data["finished_at"] is None
 
     # Run should be possibly to be bumped to 'completed' with an eventually successful end-task
     _metadata = (

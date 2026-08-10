@@ -6,9 +6,9 @@ import os
 RUN_INACTIVE_CUTOFF_TIME = int(os.environ.get("RUN_INACTIVE_CUTOFF_TIME", 60 * 6))
 
 
-def run_status_joins(table_name, metadata_table):
-    # The two LATERAL joins that pull the 'end' step's attempt metadata the run status
-    # derives from: the 'attempt_ok' boolean, and (when it failed) the retry 'attempt'.
+def run_status_joins(table_name, metadata_table, task_table):
+    # The LATERAL joins pull the 'end' step's attempt metadata and the newest task
+    # heartbeat that the run status derives from.
     # Returned as a list of SQL fragments to splice into a run query's FROM clause.
     return [
         """
@@ -44,14 +44,25 @@ def run_status_joins(table_name, metadata_table):
             LIMIT 1
         ) as end_attempt ON true
         """.format(table_name=table_name, metadata_table=metadata_table),
+        """
+        LEFT JOIN LATERAL (
+            SELECT last_heartbeat_ts
+            FROM {task_table} AS task_heartbeat
+            WHERE
+                task_heartbeat.flow_id = {table_name}.flow_id AND
+                task_heartbeat.run_number = {table_name}.run_number AND
+                task_heartbeat.last_heartbeat_ts IS NOT NULL
+            ORDER BY task_heartbeat.last_heartbeat_ts DESC
+            LIMIT 1
+        ) as latest_task_heartbeat ON true
+        """.format(table_name=table_name, task_table=task_table),
     ]
 
 
 def run_status_case(table_name, cutoff=RUN_INACTIVE_CUTOFF_TIME):
-    # Derived run status (running/completed/failed). Depends on the two run_status_joins
-    # being present. A run is 'running' while the end step is retrying or its heartbeat is
-    # still fresh, 'completed'/'failed' from the end step's attempt_ok, else 'failed' once
-    # the heartbeat is older than the cutoff.
+    # Derived run status (running/completed/failed). Depends on run_status_joins being
+    # present. A run is 'running' while the end step is retrying, its own heartbeat is
+    # fresh, or any task heartbeat is fresh. A final end-step result still wins.
     return """
         (CASE
             WHEN end_attempt IS NOT NULL
@@ -63,6 +74,9 @@ def run_status_case(table_name, cutoff=RUN_INACTIVE_CUTOFF_TIME):
             THEN 'failed'
             WHEN {table_name}.last_heartbeat_ts IS NOT NULL
                 AND @(extract(epoch from now())-{table_name}.last_heartbeat_ts)<={cutoff}
+            THEN 'running'
+            WHEN latest_task_heartbeat.last_heartbeat_ts IS NOT NULL
+                AND @(extract(epoch from now())-latest_task_heartbeat.last_heartbeat_ts)<={cutoff}
             THEN 'running'
             ELSE 'failed'
         END) AS status

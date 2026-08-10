@@ -684,7 +684,7 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
     # services/data/run_status.py, so the metadata service and the ui_backend agree on
     # what the UI reports. The lateral joins are only spliced in when a status filter is
     # requested (enable_joins), so the plain get_all_runs path stays a join-free query.
-    joins = run_status_joins(RUN_TABLE_NAME, METADATA_TABLE_NAME)
+    joins = run_status_joins(RUN_TABLE_NAME, METADATA_TABLE_NAME, TASK_TABLE_NAME)
 
     join_columns = [run_status_case(RUN_TABLE_NAME)]
 
