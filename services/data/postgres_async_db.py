@@ -53,6 +53,34 @@ operator_match = re.compile("([^:]*):([=><]+)$")
 
 # use a ddmmyyy timestamp as the version for triggers
 TRIGGER_VERSION = "05092024"
+
+
+def _run_tags_join(table_name):
+    # LEFT JOIN fragment that grafts runs_v3.tags / runs_v3.system_tags onto a
+    # step/task/artifact query, so the read API returns the ancestral run's tags
+    # without a separate get_run call per listing (replacing the post-query
+    # apply_run_tags_to_db_response round-trip + deepcopy).
+    return (
+        "LEFT JOIN {run_table} AS run_for_tags "
+        "ON {table_name}.flow_id = run_for_tags.flow_id "
+        "AND {table_name}.run_number = run_for_tags.run_number"
+    ).format(run_table=RUN_TABLE_NAME, table_name=table_name)
+
+
+def _run_tag_qualified_columns(table_name, keys):
+    # Select columns qualified by table_name, with tags/system_tags pulled from
+    # the joined runs_v3 alias 'run_for_tags' (see _run_tags_join). The step/task/
+    # artifact tables store their own tags, but the read API contract returns the
+    # run's tags, so those two columns are redirected to the join.
+    cols = []
+    for k in keys:
+        if k in ("tags", "system_tags"):
+            cols.append("run_for_tags.%s AS %s" % (k, k))
+        else:
+            cols.append("%s.%s AS %s" % (table_name, k, k))
+    return cols
+
+
 TRIGGER_NAME_PREFIX = "notify_ui"
 
 
@@ -224,6 +252,16 @@ class AsyncPostgresTable(object):
                     conditions=self.trigger_conditions,
                 )
 
+    def _resolve_select_columns(self, with_run_tags: bool = False) -> List[str]:
+        """Columns to select for a single read.
+
+        A method taking the flag rather than a property reading instance state:
+        table objects are shared across concurrent requests, so anything stashed
+        on self can be clobbered by another request across an await. Subclasses
+        that support the run-tags join override this.
+        """
+        return self.select_columns
+
     async def get_records(
         self,
         filter_dict={},
@@ -232,6 +270,7 @@ class AsyncPostgresTable(object):
         limit: int = 0,
         expanded=False,
         cur: aiopg.Cursor = None,
+        with_run_tags: bool = False,
     ) -> DBResponse:
         conditions = []
         values = []
@@ -247,6 +286,7 @@ class AsyncPostgresTable(object):
             limit=limit,
             expanded=expanded,
             cur=cur,
+            with_run_tags=with_run_tags,
         )
         return response
 
@@ -303,6 +343,7 @@ class AsyncPostgresTable(object):
         expanded=False,
         enable_joins=False,
         cur: aiopg.Cursor = None,
+        with_run_tags: bool = False,
     ) -> Tuple[DBResponse, DBPagination]:
         sql_template = """
         SELECT * FROM (
@@ -317,14 +358,17 @@ class AsyncPostgresTable(object):
         {offset}
         """
 
+        # For tables carrying the run-tags join, opting in implies enabling joins.
+        use_joins = enable_joins or with_run_tags
+
         select_sql = sql_template.format(
             keys=",".join(
-                self.select_columns
-                + (self.join_columns if enable_joins and self.join_columns else [])
+                self._resolve_select_columns(with_run_tags)
+                + (self.join_columns if use_joins and self.join_columns else [])
             ),
             table_name=self.table_name,
             joins=(
-                " ".join(self.joins) if enable_joins and self.joins is not None else ""
+                " ".join(self.joins) if use_joins and self.joins is not None else ""
             ),
             where="WHERE {}".format(" AND ".join(conditions)) if conditions else "",
             order_by="ORDER BY {}".format(", ".join(order)) if order else "",
@@ -905,7 +949,29 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
         )
 
 
-class AsyncStepTablePostgres(AsyncPostgresTable):
+class _RunTagsJoinMixin:
+    """Opt-in run-tags join for step/task/artifact reads.
+
+    The read API contract returns the ancestral run's tags, not the row's own
+    stored tags. Default reads (DB layer) are unchanged and return stored tags.
+    Handler-facing reads pass with_run_tags=True, which embeds a LEFT JOIN to
+    runs_v3 in the query so the run's tags come back in the same SELECT --
+    replacing the post-query get_run + deepcopy in apply_run_tags_to_db_response.
+
+    with_run_tags is threaded through as a call argument the whole way down
+    (get_records -> find_records -> _resolve_select_columns) and is never stored
+    on the instance. One table object serves every concurrent request, so a flag
+    held on self would be visible to -- and clobbered by -- other requests that
+    interleave at any await inside the read.
+    """
+
+    def _resolve_select_columns(self, with_run_tags: bool = False) -> List[str]:
+        if with_run_tags:
+            return _run_tag_qualified_columns(self.table_name, self.keys)
+        return self.keys
+
+
+class AsyncStepTablePostgres(_RunTagsJoinMixin, AsyncPostgresTable):
     step_dict = {}
     run_to_step_dict = {}
     _row_type = StepRow
@@ -922,8 +988,10 @@ class AsyncStepTablePostgres(AsyncPostgresTable):
     ]
     primary_keys = ["flow_id", "run_number", "step_name"]
     trigger_keys = primary_keys
-    select_columns = keys
     run_table_name = AsyncRunTablePostgres.table_name
+
+    # Only used when a read opts in via with_run_tags=True (see _RunTagsJoinMixin).
+    joins = [_run_tags_join(STEP_TABLE_NAME)]
 
     async def add_step(self, step_object: StepRow):
         dict = {
@@ -937,22 +1005,28 @@ class AsyncStepTablePostgres(AsyncPostgresTable):
         }
         return await self.create_record(dict)
 
-    async def get_steps(self, flow_id: str, run_id: str):
+    async def get_steps(self, flow_id: str, run_id: str, with_run_tags: bool = False):
         run_id_key, run_id_value = translate_run_key(run_id)
         filter_dict = {"flow_id": flow_id, run_id_key: run_id_value}
-        return await self.get_records(filter_dict=filter_dict)
+        return await self.get_records(
+            filter_dict=filter_dict, with_run_tags=with_run_tags
+        )
 
-    async def get_step(self, flow_id: str, run_id: str, step_name: str):
+    async def get_step(
+        self, flow_id: str, run_id: str, step_name: str, with_run_tags: bool = False
+    ):
         run_id_key, run_id_value = translate_run_key(run_id)
         filter_dict = {
             "flow_id": flow_id,
             run_id_key: run_id_value,
             "step_name": step_name,
         }
-        return await self.get_records(filter_dict=filter_dict, fetch_single=True)
+        return await self.get_records(
+            filter_dict=filter_dict, fetch_single=True, with_run_tags=with_run_tags
+        )
 
 
-class AsyncTaskTablePostgres(AsyncPostgresTable):
+class AsyncTaskTablePostgres(_RunTagsJoinMixin, AsyncPostgresTable):
     task_dict = {}
     step_to_task_dict = {}
     _current_count = 0
@@ -973,8 +1047,10 @@ class AsyncTaskTablePostgres(AsyncPostgresTable):
     ]
     primary_keys = ["flow_id", "run_number", "step_name", "task_id"]
     trigger_keys = primary_keys
-    select_columns = keys
     step_table_name = AsyncStepTablePostgres.table_name
+
+    # Only used when a read opts in via with_run_tags=True (see _RunTagsJoinMixin).
+    joins = [_run_tags_join(TASK_TABLE_NAME)]
 
     async def add_task(self, task: TaskRow, fill_heartbeat=False):
         # todo backfill run_number if missing?
@@ -991,14 +1067,18 @@ class AsyncTaskTablePostgres(AsyncPostgresTable):
         }
         return await self.create_record(dict)
 
-    async def get_tasks(self, flow_id: str, run_id: str, step_name: str):
+    async def get_tasks(
+        self, flow_id: str, run_id: str, step_name: str, with_run_tags: bool = False
+    ):
         run_id_key, run_id_value = translate_run_key(run_id)
         filter_dict = {
             "flow_id": flow_id,
             run_id_key: run_id_value,
             "step_name": step_name,
         }
-        return await self.get_records(filter_dict=filter_dict)
+        return await self.get_records(
+            filter_dict=filter_dict, with_run_tags=with_run_tags
+        )
 
     async def get_filtered_tasks_paginated(
         self,
@@ -1007,6 +1087,7 @@ class AsyncTaskTablePostgres(AsyncPostgresTable):
         cur_ts: int = None,
         cur_task: int = None,
         limit: int = None,
+        with_run_tags: bool = False,
     ):
         if cur_ts is not None and cur_task is not None:
             conditions.append("(ts_epoch, task_id) < (%s,%s)")
@@ -1015,12 +1096,14 @@ class AsyncTaskTablePostgres(AsyncPostgresTable):
         cur_limit = limit + 1
 
         # Filtered task listing. The field:operator conditions/values come pre-built from
-        # the shared grammar; there are no derived columns here, so no joins are needed.
+        # the shared grammar; there are no derived columns here, so no joins are needed
+        # beyond the optional run-tags join.
         response, pagination = await self.find_records(
             conditions=conditions,
             values=values,
             limit=cur_limit,
             order=order,
+            with_run_tags=with_run_tags,
         )
 
         if len(response.body) > limit:
@@ -1039,6 +1122,7 @@ class AsyncTaskTablePostgres(AsyncPostgresTable):
         step_name: str,
         task_id: str,
         expanded: bool = False,
+        with_run_tags: bool = False,
     ):
         run_id_key, run_id_value = translate_run_key(run_id)
         task_id_key, task_id_value = translate_task_key(task_id)
@@ -1049,7 +1133,10 @@ class AsyncTaskTablePostgres(AsyncPostgresTable):
             task_id_key: task_id_value,
         }
         return await self.get_records(
-            filter_dict=filter_dict, fetch_single=True, expanded=expanded
+            filter_dict=filter_dict,
+            fetch_single=True,
+            expanded=expanded,
+            with_run_tags=with_run_tags,
         )
 
     async def update_heartbeat(
@@ -1277,7 +1364,7 @@ class AsyncMetadataTablePostgres(AsyncPostgresTable):
         return flattened_response, pagination
 
 
-class AsyncArtifactTablePostgres(AsyncPostgresTable):
+class AsyncArtifactTablePostgres(_RunTagsJoinMixin, AsyncPostgresTable):
     artifact_dict = {}
     run_to_artifact_dict = {}
     step_to_artifact_dict = {}
@@ -1315,7 +1402,26 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
     ]
     trigger_keys = primary_keys
     trigger_operations = ["INSERT"]
-    select_columns = keys
+
+    # Only used when a read opts in via with_run_tags=True (see _RunTagsJoinMixin).
+    joins = [_run_tags_join(ARTIFACT_TABLE_NAME)]
+
+    def _run_tag_qualified_keys(self):
+        # Comma-joined qualified columns for the custom paginated SQL templates
+        # (which interpolate {keys} directly rather than going through find_records).
+        return ", ".join(_run_tag_qualified_columns(self.table_name, self.keys))
+
+    def _artifact_sql_parts(self, with_run_tags: bool):
+        # SQL fragments for the custom paginated artifact templates. The default
+        # returns the original unqualified, join-free parts; with_run_tags embeds
+        # the runs_v3 join and qualifies columns, which the join requires.
+        if with_run_tags:
+            return (
+                self._run_tag_qualified_keys(),
+                self.joins[0],
+                "%s." % self.table_name,
+            )
+        return ", ".join(self.keys), "", ""
 
     async def add_artifact(
         self,
@@ -1356,13 +1462,17 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         }
         return await self.create_record(dict)
 
-    async def get_artifacts_in_runs(self, flow_id: str, run_id: int):
+    async def get_artifacts_in_runs(
+        self, flow_id: str, run_id: int, with_run_tags: bool = False
+    ):
         run_id_key, run_id_value = translate_run_key(run_id)
         filter_dict = {
             "flow_id": flow_id,
             run_id_key: run_id_value,
         }
-        return await self.get_records(filter_dict=filter_dict, ordering=self.ordering)
+        return await self.get_records(
+            filter_dict=filter_dict, ordering=self.ordering, with_run_tags=with_run_tags
+        )
 
     async def get_artifacts_in_runs_paginated(
         self,
@@ -1372,13 +1482,17 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         cur_task: int = None,
         cur_name: str = None,
         limit: int = None,
+        with_run_tags: bool = False,
     ):
         run_id_key, run_id_value = translate_run_key(run_id)
         filter_dict = {
             "flow_id": flow_id,
             run_id_key: run_id_value,
         }
-        conditions = [f"{k} = %s" for k, v in filter_dict.items() if v is not None]
+        keys_sql, join_sql, col_prefix = self._artifact_sql_parts(with_run_tags)
+        conditions = [
+            f"{col_prefix}{k} = %s" for k, v in filter_dict.items() if v is not None
+        ]
         values = [v for k, v in filter_dict.items() if v is not None]
 
         cursor_where = ""
@@ -1392,10 +1506,11 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         # Cursor is applied outside the subquery, after the latest-attempt filter.
         sql_template = """
         SELECT * FROM (
-                SELECT DISTINCT ON (task_id, name) {keys}
+                SELECT DISTINCT ON ({col_prefix}task_id, {col_prefix}name) {keys}
                 FROM {table}
+                {join}
                 WHERE {where}
-                ORDER BY task_id, name, ts_epoch DESC
+                ORDER BY {col_prefix}task_id, {col_prefix}name, {col_prefix}ts_epoch DESC
             ) T
             {cursor_where}
             ORDER BY ts_epoch DESC, task_id DESC, name DESC
@@ -1403,8 +1518,10 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         """
 
         select_sql = sql_template.format(
-            keys=", ".join(self.keys),
+            keys=keys_sql,
             table=self.table_name,
+            join=join_sql,
+            col_prefix=col_prefix,
             where=" AND ".join(conditions),
             cursor_where=cursor_where,
             limit=cur_limit,
@@ -1423,14 +1540,18 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
 
         return db_response, pagination
 
-    async def get_artifact_in_steps(self, flow_id: str, run_id: int, step_name: str):
+    async def get_artifact_in_steps(
+        self, flow_id: str, run_id: int, step_name: str, with_run_tags: bool = False
+    ):
         run_id_key, run_id_value = translate_run_key(run_id)
         filter_dict = {
             "flow_id": flow_id,
             run_id_key: run_id_value,
             "step_name": step_name,
         }
-        return await self.get_records(filter_dict=filter_dict, ordering=self.ordering)
+        return await self.get_records(
+            filter_dict=filter_dict, ordering=self.ordering, with_run_tags=with_run_tags
+        )
 
     async def get_artifact_in_steps_paginated(
         self,
@@ -1441,6 +1562,7 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         cur_task: int = None,
         cur_name: str = None,
         limit: int = None,
+        with_run_tags: bool = False,
     ):
         run_id_key, run_id_value = translate_run_key(run_id)
         filter_dict = {
@@ -1448,7 +1570,10 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
             run_id_key: run_id_value,
             "step_name": step_name,
         }
-        conditions = [f"{k} = %s" for k, v in filter_dict.items() if v is not None]
+        keys_sql, join_sql, col_prefix = self._artifact_sql_parts(with_run_tags)
+        conditions = [
+            f"{col_prefix}{k} = %s" for k, v in filter_dict.items() if v is not None
+        ]
         values = [v for k, v in filter_dict.items() if v is not None]
 
         cursor_where = ""
@@ -1462,10 +1587,11 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         # Cursor is applied outside the subquery, after the latest-attempt filter.
         sql_template = """
         SELECT * FROM (
-                SELECT DISTINCT ON (task_id, name) {keys}
+                SELECT DISTINCT ON ({col_prefix}task_id, {col_prefix}name) {keys}
                 FROM {table}
+                {join}
                 WHERE {where}
-                ORDER BY task_id, name, ts_epoch DESC
+                ORDER BY {col_prefix}task_id, {col_prefix}name, {col_prefix}ts_epoch DESC
             ) T
             {cursor_where}
             ORDER BY ts_epoch DESC, task_id DESC, name DESC
@@ -1473,8 +1599,10 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         """
 
         select_sql = sql_template.format(
-            keys=", ".join(self.keys),
+            keys=keys_sql,
             table=self.table_name,
+            join=join_sql,
+            col_prefix=col_prefix,
             where=" AND ".join(conditions),
             cursor_where=cursor_where,
             limit=cur_limit,
@@ -1494,7 +1622,12 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         return db_response, pagination
 
     async def get_artifact_in_task(
-        self, flow_id: str, run_id: int, step_name: str, task_id: int
+        self,
+        flow_id: str,
+        run_id: int,
+        step_name: str,
+        task_id: int,
+        with_run_tags: bool = False,
     ):
         run_id_key, run_id_value = translate_run_key(run_id)
         task_id_key, task_id_value = translate_task_key(task_id)
@@ -1504,7 +1637,9 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
             "step_name": step_name,
             task_id_key: task_id_value,
         }
-        return await self.get_records(filter_dict=filter_dict, ordering=self.ordering)
+        return await self.get_records(
+            filter_dict=filter_dict, ordering=self.ordering, with_run_tags=with_run_tags
+        )
 
     async def get_artifact_in_task_paginated(
         self,
@@ -1516,6 +1651,7 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         cur_task: int = None,
         cur_name: str = None,
         limit: int = None,
+        with_run_tags: bool = False,
     ):
         run_id_key, run_id_value = translate_run_key(run_id)
         task_id_key, task_id_value = translate_task_key(task_id)
@@ -1526,7 +1662,10 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
             task_id_key: task_id_value,
         }
 
-        conditions = [f"{k} = %s" for k, v in filter_dict.items() if v is not None]
+        keys_sql, join_sql, col_prefix = self._artifact_sql_parts(with_run_tags)
+        conditions = [
+            f"{col_prefix}{k} = %s" for k, v in filter_dict.items() if v is not None
+        ]
         values = [v for k, v in filter_dict.items() if v is not None]
 
         cursor_where = ""
@@ -1540,10 +1679,11 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         # Cursor is applied outside the subquery, after the latest-attempt filter.
         sql_template = """
         SELECT * FROM (
-                SELECT DISTINCT ON (task_id, name) {keys}
+                SELECT DISTINCT ON ({col_prefix}task_id, {col_prefix}name) {keys}
                 FROM {table}
+                {join}
                 WHERE {where}
-                ORDER BY task_id, name, ts_epoch DESC
+                ORDER BY {col_prefix}task_id, {col_prefix}name, {col_prefix}ts_epoch DESC
             ) T
             {cursor_where}
             ORDER BY ts_epoch DESC, task_id DESC, name DESC
@@ -1551,8 +1691,10 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         """
 
         select_sql = sql_template.format(
-            keys=", ".join(self.keys),
+            keys=keys_sql,
             table=self.table_name,
+            join=join_sql,
+            col_prefix=col_prefix,
             where=" AND ".join(conditions),
             cursor_where=cursor_where,
             limit=cur_limit,
@@ -1572,7 +1714,13 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         return db_response, pagination
 
     async def get_artifact(
-        self, flow_id: str, run_id: int, step_name: str, task_id: int, name: str
+        self,
+        flow_id: str,
+        run_id: int,
+        step_name: str,
+        task_id: int,
+        name: str,
+        with_run_tags: bool = False,
     ):
         # Return the artifact metadata for the latest attempt of the task.
         #
@@ -1595,7 +1743,10 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
             '"name"': "name",
         }
         name_record = await self.get_records(
-            filter_dict=filter_dict, fetch_single=True, ordering=self.ordering
+            filter_dict=filter_dict,
+            fetch_single=True,
+            ordering=self.ordering,
+            with_run_tags=with_run_tags,
         )
 
         return await self.get_artifact_by_attempt(
@@ -1605,6 +1756,7 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
             task_id,
             name,
             name_record.body.get("attempt_id", 0),
+            with_run_tags=with_run_tags,
         )
 
     async def get_artifact_by_attempt(
@@ -1615,6 +1767,7 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
         task_id: int,
         name: str,
         attempt: int,
+        with_run_tags: bool = False,
     ):
 
         run_id_key, run_id_value = translate_run_key(run_id)
@@ -1628,5 +1781,8 @@ class AsyncArtifactTablePostgres(AsyncPostgresTable):
             '"attempt_id"': attempt,
         }
         return await self.get_records(
-            filter_dict=filter_dict, fetch_single=True, ordering=self.ordering
+            filter_dict=filter_dict,
+            fetch_single=True,
+            ordering=self.ordering,
+            with_run_tags=with_run_tags,
         )
