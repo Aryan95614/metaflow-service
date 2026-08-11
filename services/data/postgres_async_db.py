@@ -219,6 +219,7 @@ class AsyncPostgresTable(object):
     keys: List[str] = []
     primary_keys: List[str] = None
     trigger_keys: List[str] = None
+    cursor_keys: List[str] = []
     trigger_operations: List[str] = ["INSERT", "UPDATE", "DELETE"]
     trigger_conditions: List[str] = None
     ordering: List[str] = None
@@ -723,6 +724,7 @@ class AsyncFlowTablePostgres(AsyncPostgresTable):
     keys = ["flow_id", "user_name", "ts_epoch", "tags", "system_tags"]
     primary_keys = ["flow_id"]
     trigger_keys = primary_keys
+    cursor_keys = ["ts_epoch", "flow_id"]
     select_columns = keys
     _row_type = FlowRow
 
@@ -773,6 +775,7 @@ class AsyncRunTablePostgres(AsyncPostgresTable):
     ]
     primary_keys = ["flow_id", "run_number"]
     trigger_keys = primary_keys + ["last_heartbeat_ts"]
+    cursor_keys = ["ts_epoch", "run_number"]
     flow_table_name = AsyncFlowTablePostgres.table_name
 
     # Derived run status (running/completed/failed). This mirrors the definition in
@@ -1047,6 +1050,7 @@ class AsyncTaskTablePostgres(_RunTagsJoinMixin, AsyncPostgresTable):
     ]
     primary_keys = ["flow_id", "run_number", "step_name", "task_id"]
     trigger_keys = primary_keys
+    cursor_keys = ["ts_epoch", "task_id"]
     step_table_name = AsyncStepTablePostgres.table_name
 
     # Only used when a read opts in via with_run_tags=True (see _RunTagsJoinMixin).
@@ -1192,6 +1196,7 @@ class AsyncMetadataTablePostgres(AsyncPostgresTable):
         "value",
         "tags",
     ]
+    cursor_keys = ["ts_epoch", "id"]
     trigger_operations = ["INSERT"]
     select_columns = keys
 
@@ -1401,6 +1406,7 @@ class AsyncArtifactTablePostgres(_RunTagsJoinMixin, AsyncPostgresTable):
         "name",
     ]
     trigger_keys = primary_keys
+    cursor_keys = ["ts_epoch", "task_id", "name"]
     trigger_operations = ["INSERT"]
 
     # Only used when a read opts in via with_run_tags=True (see _RunTagsJoinMixin).
