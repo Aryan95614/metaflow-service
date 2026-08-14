@@ -33,6 +33,7 @@ class AsyncStepTablePostgres(AsyncPostgresTable):
             WHERE {table_name}.flow_id={task_table}.flow_id
             AND {table_name}.run_number={task_table}.run_number
             AND {table_name}.step_name={task_table}.step_name
+            AND {task_table}.last_heartbeat_ts IS NOT NULL
             ORDER BY last_heartbeat_ts DESC
             LIMIT 1
         ) AS latest_task_hb ON true

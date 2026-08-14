@@ -161,3 +161,44 @@ async def test_step_duration(cli, db):
         200,
         _step,
     )
+
+
+async def test_step_duration_ignores_null_task_heartbeats(cli, db):
+    _flow = (await add_flow(db, flow_id="HeartbeatStepFlow")).body
+    _run = (await add_run(db, flow_id=_flow["flow_id"])).body
+    _step = (
+        await add_step(
+            db,
+            flow_id=_run["flow_id"],
+            step_name="foreach",
+            run_number=_run["run_number"],
+        )
+    ).body
+    heartbeat_task = (
+        await add_task(
+            db,
+            flow_id=_run["flow_id"],
+            run_number=_run["run_number"],
+            step_name=_step["step_name"],
+            last_heartbeat_ts=get_heartbeat_ts(offset=10),
+        )
+    ).body
+    await add_task(
+        db,
+        flow_id=_run["flow_id"],
+        run_number=_run["run_number"],
+        step_name=_step["step_name"],
+        last_heartbeat_ts=None,
+    )
+
+    _step["run_id"] = _run["run_number"]
+    _step["duration"] = heartbeat_task["last_heartbeat_ts"] * 1000 - _step["ts_epoch"]
+    update_objects_with_run_tags("step", [_step], _run)
+
+    await _test_single_resource(
+        cli,
+        db,
+        "/flows/{flow_id}/runs/{run_number}/steps/{step_name}".format(**_step),
+        200,
+        _step,
+    )
