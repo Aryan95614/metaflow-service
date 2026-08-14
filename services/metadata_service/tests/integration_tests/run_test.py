@@ -13,7 +13,10 @@ from .utils import (
     compare_partial,
     add_flow,
     add_run,
+    add_step,
+    add_task,
     add_metadata,
+    add_artifact,
     assert_api_patch_response,
     assert_paginated_api_get_response,
 )
@@ -230,6 +233,125 @@ async def test_runs_get_status_filter_rejects_unknown(cli, db):
 
     resp = await cli.get("/flows/{flow_id}/runs?status:eq=bogus".format(**_flow))
     assert resp.status == 400
+
+
+async def test_run_failures_returns_latest_failed_attempts_with_exception_refs(cli, db):
+    _flow = (
+        await add_flow(
+            db, "FailureSummaryFlow", "test_user", ["a_tag"], ["runtime:test"]
+        )
+    ).body
+    _run = (await add_run(db, flow_id=_flow["flow_id"])).body
+    _step = (
+        await add_step(
+            db,
+            flow_id=_run["flow_id"],
+            run_number=_run["run_number"],
+            step_name="work",
+        )
+    ).body
+
+    async def task_attempt_ok(ok, attempt=0):
+        task = (
+            await add_task(
+                db,
+                flow_id=_step["flow_id"],
+                run_number=_step["run_number"],
+                step_name=_step["step_name"],
+            )
+        ).body
+        status = (
+            await add_metadata(
+                db,
+                flow_id=task["flow_id"],
+                run_number=task["run_number"],
+                step_name=task["step_name"],
+                task_id=task["task_id"],
+                metadata={"field_name": "attempt_ok", "value": str(ok)},
+                tags=["attempt_id:%d" % attempt],
+            )
+        ).body
+        return task, status
+
+    failed_with_exception, first_status = await task_attempt_ok(False)
+    exception_artifact = {
+        "name": "_exception",
+        "location": "s3://bucket/failure",
+        "ds_type": "s3",
+        "sha": "deadbeef",
+        "type": "metaflow.exception.MetaflowExceptionWrapper",
+        "content_type": "application/python-pickle",
+        "attempt_id": 0,
+    }
+    exception = (
+        await add_artifact(
+            db,
+            flow_id=failed_with_exception["flow_id"],
+            run_number=failed_with_exception["run_number"],
+            step_name=failed_with_exception["step_name"],
+            task_id=failed_with_exception["task_id"],
+            artifact=exception_artifact,
+        )
+    ).body
+
+    # A task that failed and then succeeded is not a current failure.
+    recovered, _ = await task_attempt_ok(False)
+    await add_metadata(
+        db,
+        flow_id=recovered["flow_id"],
+        run_number=recovered["run_number"],
+        step_name=recovered["step_name"],
+        task_id=recovered["task_id"],
+        metadata={"field_name": "attempt_ok", "value": "True"},
+        tags=["attempt_id:1"],
+    )
+
+    failed_without_exception, last_status = await task_attempt_ok(False)
+
+    path = "/flows/{flow_id}/runs/{run_number}/failures".format(**_run)
+    expected_without_exception = {
+        "flow_id": _run["flow_id"],
+        "run_number": _run["run_number"],
+        "step_name": failed_without_exception["step_name"],
+        "task_id": failed_without_exception["task_id"],
+        "attempt_id": 0,
+        "failed_at": last_status["ts_epoch"],
+        "exception": None,
+    }
+    expected_with_exception = {
+        "flow_id": _run["flow_id"],
+        "run_number": _run["run_number"],
+        "step_name": failed_with_exception["step_name"],
+        "task_id": failed_with_exception["task_id"],
+        "attempt_id": 0,
+        "failed_at": first_status["ts_epoch"],
+        "exception": {
+            "name": "_exception",
+            "location": exception["location"],
+            "ds_type": exception["ds_type"],
+            "sha": exception["sha"],
+            "type": exception["type"],
+            "content_type": exception["content_type"],
+            "ts_epoch": exception["ts_epoch"],
+        },
+    }
+
+    cursor = await assert_paginated_api_get_response(
+        cli,
+        path,
+        data=[expected_without_exception],
+        params={"_limit": 1},
+        has_next_cursor=True,
+    )
+    await assert_paginated_api_get_response(
+        cli,
+        path,
+        data=[expected_with_exception],
+        params={"_limit": 1, "_cursor": cursor},
+        has_next_cursor=False,
+    )
+    assert (await cli.get(path, params={"_cursor": "garbage"})).status == 400
+    assert (await cli.get(path, params={"_limit": 0})).status == 400
 
 
 async def test_runs_get_status_filter_classification(cli, db):
