@@ -31,6 +31,7 @@ RUN_ALLOWED_FILTERS = [
 ]
 # Fields whose values must be integer epoch milliseconds.
 _NUMERIC_FILTERS = {"ts_epoch", "last_heartbeat_ts"}
+RUN_FAILURE_CURSOR_KEYS = ["failed_at", "task_id", "step_name", "attempt_id"]
 
 
 def _split_field_op(key):
@@ -76,6 +77,11 @@ class RunApi(object):
     def __init__(self, app):
         app.router.add_route("GET", "/flows/{flow_id}/runs", self.get_all_runs)
         app.router.add_route("GET", "/flows/{flow_id}/runs/{run_number}", self.get_run)
+        app.router.add_route(
+            "GET",
+            "/flows/{flow_id}/runs/{run_number}/failures",
+            self.get_run_failures,
+        )
         app.router.add_route("POST", "/flows/{flow_id}/run", self.create_run)
         app.router.add_route(
             "POST", "/flows/{flow_id}/runs/{run_number}/heartbeat", self.runs_heartbeat
@@ -86,6 +92,86 @@ class RunApi(object):
             self.mutate_user_tags,
         )
         self._async_table = AsyncPostgresDB.get_instance().run_table_postgres
+        self._async_metadata_table = (
+            AsyncPostgresDB.get_instance().metadata_table_postgres
+        )
+
+    @format_response
+    @handle_exceptions
+    async def get_run_failures(self, request):
+        """
+        ---
+        description: Get the latest failed attempt for each task in a run, with its exception artifact reference.
+        tags:
+        - Run
+        parameters:
+        - name: "flow_id"
+          in: "path"
+          required: true
+          type: "string"
+        - name: "run_number"
+          in: "path"
+          required: true
+          type: "string"
+        - name: "_limit"
+          in: "query"
+          description: "page size (default 50, max 500)."
+          required: false
+          type: "integer"
+        - name: "_cursor"
+          in: "query"
+          description: "opaque pagination cursor, returned via the X-Next-Cursor header."
+          required: false
+          type: "string"
+        produces:
+        - text/plain
+        responses:
+            "200":
+                description: Latest failed task attempts and datastore references for their _exception artifacts.
+            "400":
+                description: Invalid cursor or page size.
+        """
+        flow_id = request.match_info.get("flow_id")
+        run_number = request.match_info.get("run_number")
+
+        try:
+            limit = min(int(request.query.get("_limit", 50)), 500)
+            if limit < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            return DBResponse(response_code=400, body="Invalid limit")
+
+        cursor_values = [None, None, None, None]
+        cursor = request.query.get("_cursor")
+        if cursor:
+            try:
+                cursor_dict = decode_cursor(cursor, RUN_FAILURE_CURSOR_KEYS)
+                cursor_values = [
+                    int(cursor_dict["failed_at"]),
+                    int(cursor_dict["task_id"]),
+                    str(cursor_dict["step_name"]),
+                    int(cursor_dict["attempt_id"]),
+                ]
+            except ValueError:
+                return DBResponse(response_code=400, body="Invalid cursor")
+
+        db_response, pagination = (
+            await self._async_metadata_table.get_run_failures_paginated(
+                flow_id,
+                run_number,
+                *cursor_values,
+                limit=limit,
+            )
+        )
+
+        if pagination.next_cursor_record:
+            record = pagination.next_cursor_record
+            pagination = pagination._replace(
+                next_cursor=encode_cursor(
+                    {key: record[key] for key in RUN_FAILURE_CURSOR_KEYS}
+                )
+            )
+        return db_response, pagination
 
     @format_response
     @handle_exceptions

@@ -1236,6 +1236,168 @@ class AsyncMetadataTablePostgres(AsyncPostgresTable):
         filter_dict = {"flow_id": flow_id, run_id_key: run_id_value}
         return await self.get_records(filter_dict=filter_dict)
 
+    async def get_run_failures_paginated(
+        self,
+        flow_id: str,
+        run_id: str,
+        cur_failed_at: int = None,
+        cur_task: int = None,
+        cur_step: str = None,
+        cur_attempt: int = None,
+        limit: int = 50,
+    ):
+        """Return each task's latest failed attempt and its exception artifact ref."""
+        run_id_key, run_id_value = translate_run_key(run_id)
+        values = [flow_id, run_id_value]
+        cursor_where = ""
+        if all(
+            value is not None
+            for value in (cur_failed_at, cur_task, cur_step, cur_attempt)
+        ):
+            cursor_where = """
+                AND (latest.failed_at, latest.task_id, latest.step_name, latest.attempt_id)
+                    < (%s, %s, %s, %s)
+            """
+            values.extend([cur_failed_at, cur_task, cur_step, cur_attempt])
+
+        select_sql = """
+        WITH parsed_status AS (
+            SELECT
+                status.flow_id,
+                status.run_number,
+                status.step_name,
+                status.task_id,
+                status.ts_epoch AS failed_at,
+                substring(status.tags::text from 'attempt_id:([0-9]+)')::int
+                    AS attempt_id,
+                (CASE
+                    WHEN pg_typeof(status.value) = 'jsonb'::regtype
+                    THEN status.value::jsonb->>0
+                    ELSE status.value::text
+                END)::boolean AS attempt_ok
+            FROM {metadata_table} AS status
+            WHERE status.flow_id = %s
+              AND status.{run_id_key} = %s
+              AND status.field_name = 'attempt_ok'
+        ), latest AS (
+            SELECT DISTINCT ON (flow_id, run_number, step_name, task_id)
+                flow_id,
+                run_number,
+                step_name,
+                task_id,
+                failed_at,
+                attempt_id,
+                attempt_ok
+            FROM parsed_status
+            WHERE attempt_id IS NOT NULL
+            ORDER BY
+                flow_id, run_number, step_name, task_id,
+                attempt_id DESC, failed_at DESC
+        ), page AS (
+            SELECT
+                latest.flow_id,
+                latest.run_number,
+                latest.step_name,
+                latest.task_id,
+                latest.failed_at,
+                latest.attempt_id
+            FROM latest
+            WHERE latest.attempt_ok IS FALSE
+            {cursor_where}
+            ORDER BY
+                latest.failed_at DESC,
+                latest.task_id DESC,
+                latest.step_name DESC,
+                latest.attempt_id DESC
+            LIMIT {limit}
+        )
+        SELECT
+            page.flow_id,
+            page.run_number,
+            task.run_id,
+            page.step_name,
+            page.task_id,
+            task.task_name,
+            page.attempt_id,
+            page.failed_at,
+            exception.location AS exception_location,
+            exception.ds_type AS exception_ds_type,
+            exception.sha AS exception_sha,
+            exception.type AS exception_type,
+            exception.content_type AS exception_content_type,
+            exception.ts_epoch AS exception_ts_epoch
+        FROM page
+        LEFT JOIN {task_table} AS task
+          ON task.flow_id = page.flow_id
+         AND task.run_number = page.run_number
+         AND task.step_name = page.step_name
+         AND task.task_id = page.task_id
+        LEFT JOIN LATERAL (
+            SELECT location, ds_type, sha, type, content_type, ts_epoch
+            FROM {artifact_table} AS artifact
+            WHERE artifact.flow_id = page.flow_id
+              AND artifact.run_number = page.run_number
+              AND artifact.step_name = page.step_name
+              AND artifact.task_id = page.task_id
+              AND artifact.attempt_id = page.attempt_id
+              AND artifact.name = '_exception'
+            ORDER BY artifact.ts_epoch DESC
+            LIMIT 1
+        ) AS exception ON true
+        ORDER BY
+            page.failed_at DESC,
+            page.task_id DESC,
+            page.step_name DESC,
+            page.attempt_id DESC
+        """.format(
+            metadata_table=self.table_name,
+            task_table=TASK_TABLE_NAME,
+            artifact_table=ARTIFACT_TABLE_NAME,
+            run_id_key=run_id_key,
+            cursor_where=cursor_where,
+            limit=limit + 1,
+        )
+
+        response, pagination = await self.execute_sql(
+            select_sql=select_sql,
+            values=values,
+            serialize=False,
+            limit=limit + 1,
+        )
+        if response.response_code != 200:
+            return response, pagination
+
+        records = response.body
+        page = records[:limit]
+
+        def expose(record):
+            exception = None
+            if record["exception_location"] is not None:
+                exception = {
+                    "name": "_exception",
+                    "location": record["exception_location"],
+                    "ds_type": record["exception_ds_type"],
+                    "sha": record["exception_sha"],
+                    "type": record["exception_type"],
+                    "content_type": record["exception_content_type"],
+                    "ts_epoch": record["exception_ts_epoch"],
+                }
+            return {
+                "flow_id": record["flow_id"],
+                "run_number": record["run_id"] or record["run_number"],
+                "step_name": record["step_name"],
+                "task_id": record["task_name"] or record["task_id"],
+                "attempt_id": record["attempt_id"],
+                "failed_at": record["failed_at"],
+                "exception": exception,
+            }
+
+        response = response._replace(body=[expose(record) for record in page])
+        if len(records) <= limit:
+            pagination = pagination._replace(next_cursor_record=None)
+        pagination = pagination._replace(limit=str(limit))
+        return response, pagination
+
     async def get_metadata_paginated_in_runs(
         self,
         flow_id: str,
